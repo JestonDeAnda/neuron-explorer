@@ -204,6 +204,11 @@ body.list-hidden #layer-back { left: 56px; }
 #inf-filters input { width: 3em; padding: 3px 5px; font: 12px var(--mono); text-align: center; }
 #inf-filters #inf-q { width: auto; flex: 1; min-width: 80px; text-align: left; font-family: var(--font); }
 #inf-filters .lab { margin: 0; }
+#attr-bar { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+#attr-bar #attr-go { background: var(--raise); border-radius: 3px; padding: 3px 8px; font-size: 12px; }
+#attr-bar #attr-tok { flex: 1; min-width: 60px; padding: 3px 5px; font: 12px var(--mono); }
+#attr-rows .emb { display: block; padding: 2px 10px 8px; color: var(--dim); font-size: 12px; cursor: default; }
+#attr-rows .emb:hover { background: none; }
 
 #c-lens .words { color: var(--dim); margin-bottom: 2px; }
 

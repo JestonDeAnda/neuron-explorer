@@ -1,4 +1,4 @@
-import { createMap } from "./map3d.js?v=69";
+import { createMap } from "./map3d.js?v=70";
 import { createScatter } from "./scatter.js?v=39";
 
 const $ = s => document.querySelector(s);
@@ -101,7 +101,10 @@ async function refreshWeb() {
   const f = state.focus, first = Math.max(1, Math.min(24, Math.round(Number($("#web-z").value) || 5)));
   const k = Number(new URLSearchParams(location.search).get("webk")) || 2;
   const hops = Number(new URLSearchParams(location.search).get("webhops")) || 0;  // hops out each way; 0 = all the way
-  if (!webOn || !f || f.kind !== "neuron") { webKey = null; state.webSum = null; map.setWeb(null); renderList(); return; }
+  if (!webOn || !f || f.kind !== "neuron") {
+    webKey = null; state.webSum = null; renderList();
+    return leftTab === "run" && state.attr && state.inf.pos < 0 ? showAttr() : map.setWeb(null);
+  }
   const key = `${f.layer}/${f.n}/${first}/${k}/${hops}`;
   if (key === webKey) return;
   webKey = key;
@@ -232,6 +235,7 @@ const stillWanted = (g, mode, q) => g === qGen && state.qMode === mode && $("#le
 async function runInfer(text, g) {
   markLeftFresh("run");
   if (text !== state.inf.text) {
+    clearAttr();
     $("#run-rows").innerHTML = `<li class="head">running…</li>`;
     const r = await api("/api/infer", { text });
     if (!stillWanted(g, "fires", text)) return;
@@ -245,6 +249,7 @@ async function runInfer(text, g) {
 // clicking pins it; leaving the tokens goes back to the pinned token (or none) and the open neuron's web
 let tokHover = null, tokTimer;
 async function showTokenPaths(pos) {
+  if (pos < 0 && state.attr && leftTab === "run") return showAttr();
   if (pos < 0) { webKey = null; return refreshWeb(); }
   if (leftTab !== "run") return;
   const r = await fetch(`/api/infer/paths?pos=${pos}&min=${$("#inf-min").value || 1}`);
@@ -298,9 +303,52 @@ async function inferView(g = qGen) {
       if (v) marks.push({ layer: Math.floor(i / N), n: i % N, sign: v < 0 ? "-" : "+", w: Math.min(1, 0.25 + Math.abs(v) / 4) });
     }
   }
-  if (leftTab === "run") map.setMarks(marks.length > 40000 ? marks.sort((a, b) => b.w - a.w).slice(0, 40000) : marks);
+  if (leftTab === "run" && !(state.attr && f.pos < 0)) map.setMarks(marks.length > 40000 ? marks.sort((a, b) => b.w - a.w).slice(0, 40000) : marks);
   fireResults = { ...r, fires: true, ready: true };
   renderResults(fireResults, $("#run-rows"));
+}
+// ---------- attribution graph: which neurons, at which tokens, carry the next token (explorer/attribution.py) ----------
+state.attr = null;
+let attrGen = 0;
+$("#attr-go").onclick = async () => {
+  const text = state.inf.text || $("#inf-text").value.trim(), g = ++attrGen;
+  if (!text) return;
+  $("#attr-rows").innerHTML = `<li class="head">tracing… about a minute</li>`;
+  const r = await api("/api/attribution", { text, token: $("#attr-tok").value.trim() || null });
+  if (g !== attrGen) return;
+  if (r.error) { $("#attr-rows").innerHTML = `<li class="head">${esc(r.error)}</li>`; return; }
+  state.attr = r;
+  renderAttr();
+  if (state.inf.pos >= 0) $("#inf-toks").querySelector("button.on")?.click();  // unpin the token, so the graph shows
+  else { inferView(); showAttr(); }
+};
+$("#attr-clear").onclick = () => { clearAttr(); syncLeftMap(); };
+function clearAttr() { attrGen++; state.attr = null; $("#attr-rows").innerHTML = ""; }
+const pct = x => x == null ? "–" : `${(100 * x).toFixed(0)}%`;
+function renderAttr() {
+  const a = state.attr, s = a.stats;
+  const ns = a.nodes.filter(n => n.kind === "neuron").sort((x, y) => y.influence - x.influence);
+  const emb = a.nodes.filter(n => n.kind === "embed").sort((x, y) => y.influence - x.influence);
+  const tk = n => `<span class="tk">"${esc(n.tok)}"@${n.pos}</span>`;
+  $("#attr-rows").innerHTML = `<li class="head">→ <b>"${esc(a.target)}"</b> p ${a.prob.toFixed(2)} · ${s.kept_neurons} neurons, ${s.kept_edges} edges
+      from the ${s.candidates} strongest candidates; ${pct(s.logit_from_candidates)} of the logit comes from them directly,
+      ${pct(s.logit_other)} from other neurons. % = influence on the logit over all paths; yellow links raise the reader, magenta lower it</li>`
+    + `<li class="emb">tokens: ${emb.slice(0, 8).map(n => `${tk(n)} ${pct(n.influence)}`).join(" · ")}</li>`
+    + ns.slice(0, 300).map(n => `<li class="res" data-l="${n.layer}" data-n="${n.n}" data-kind="neuron" title="activation ${n.act} · gate ${n.gate}${n.gate < -1.278 ? " (gate-path edges have the wrong sign here)" : ""}">
+      <span class="n">L${n.layer} N${n.n}</span><span class="sg ${n.act > 0 ? "up" : "down"}">${pct(n.influence)}</span>
+      <span class="w">${tk(n)}${n.name ? `<b>${esc(n.name)}</b> ` : ""}${esc((n.lens || []).join(" "))}</span></li>`).join("");
+}
+// on the map: the graph's neurons as marks, their links as a flat web; token positions fold onto the neuron sheet
+function showAttr() {
+  const a = state.attr, nodes = a.nodes, ns = nodes.filter(n => n.kind === "neuron");
+  const top = Math.max(...ns.map(n => n.influence), 1e-9);
+  map.setMarks(ns.map(n => ({ layer: n.layer, n: n.n, sign: n.act < 0 ? "-" : "+", w: 0.3 + 0.7 * n.influence / top })));
+  const links = a.edges.filter(([s, d]) => nodes[s].kind === "neuron" && nodes[d].kind === "neuron");
+  const wmax = Math.max(...links.map(e => Math.abs(e[2])), 1e-9), rows = new Int16Array(links.length * 6);
+  links.forEach(([s, d, w], i) => rows.set([nodes[s].layer, nodes[s].n, nodes[d].layer, nodes[d].n,
+    Math.max(1, Math.round(1000 * Math.abs(w) / wmax)) * Math.sign(w), 1], i * 6));
+  webKey = "attr";
+  map.setWeb(rows, { flat: true });
 }
 function halfToFloat(h) {
   const s = h & 0x8000 ? -1 : 1, e = (h >> 10) & 0x1f, m = h & 0x3ff;
@@ -311,7 +359,7 @@ async function runLensSearch() {
   const q = $("#lens-q").value.trim(), g = ++qGen;
   if (q.length < 2) {
     // an emptied box clears both: lens hits, and the last run with its token chips, pinned token and token web
-    lensResults = null; fireResults = null;
+    lensResults = null; fireResults = null; clearAttr();
     state.inf = { ...state.inf, text: null, pos: -1, tokens: null };
     $("#inf-toks").innerHTML = ""; $("#run-rows").innerHTML = "";
     syncLeftMap(); renderList(); return;
@@ -378,7 +426,7 @@ $("#net").addEventListener("click", e => {
   if (state.qMode !== "lens") $('#q-mode button[data-q="lens"]').click();
   $("#lens-q").value = chip.dataset.q; $("#lens-q").dispatchEvent(new Event("input"));
 });
-for (const ol of [$("#rows"), $("#run-rows")]) {
+for (const ol of [$("#rows"), $("#run-rows"), $("#attr-rows")]) {
   ol.addEventListener("click", e => {
     const li = e.target.closest("li"); if (!li || !li.dataset.n) return;
     goToNeuron(li.dataset.l ? +li.dataset.l : state.layer, +li.dataset.n, li.dataset.kind);

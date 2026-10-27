@@ -467,6 +467,22 @@ def infer_paths(pos: int, top: int = 300, min: float = 1.0):
                     headers={"X-Web-Total": str(len(out)), "X-Active": str(len(active))})
 
 
+@app.post("/api/attribution")
+async def attribution(req: Request):
+    """Neuron-level attribution graph for the next token after a text (explorer/attribution.py). Body {text, chat?,
+    token?, k?}; nodes are neurons (layer, pos, n), token embeddings (layer -1) and the target logit."""
+    b = await req.json()
+    if NO_MODEL:
+        return {"error": "the live model is off (EXPLORER_NO_MODEL=1)"}
+    g = await asyncio.to_thread(rt.attribution, b["text"], b.get("chat", False), b.get("token") or None,
+                                builtins.min(int(b.get("k", 512)), 4096))
+    nm = names()
+    for nd in g["nodes"]:
+        if nd["kind"] == "neuron":
+            nd["name"] = nm.get(f"L{nd['layer']}/N{nd['n']}", "")
+    return g
+
+
 @app.get("/api/layout")
 def layout(kind: str = "writes"):
     """Seriated grid layout: cell index (row * side + col) for every neuron, base64 int16, layer-major."""

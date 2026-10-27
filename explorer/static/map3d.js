@@ -166,7 +166,7 @@ export function createMap(canvas, labelsDiv, arch, cb) {
   const webPtGeo = new THREE.BufferGeometry(), webPts = new THREE.Points(webPtGeo, glowPoints(4.5, 2.5));
   webPts.frustumCulled = false; webPts.renderOrder = 2; webPts.visible = false;
   scene.add(webPts);
-  let webEdges = null;
+  let webEdges = null, webFlat = false;  // flat: a graph with no root (attribution), every line and dot at full brightness
   const webFed = new Set(), webFeeds = new Set();  // neurons the drawn web reads into / out of (layer * N + n)
   const DEAD = 0.08;  // brightness of lines the web doesn't continue through
   const DIRECT = 0.6;  // the open neuron's direct links, relative to full brightness
@@ -186,17 +186,18 @@ export function createMap(canvas, labelsDiv, arch, cb) {
       const e = webEdges.subarray(i * 6, i * 6 + 6), a = neuronPos(e[0], e[1]), b = neuronPos(e[2], e[3]);
       const k = e[4] > 0 ? WEB_UP : WEB_DOWN;
       const s0 = nk(e[0], e[1]), d0 = nk(e[2], e[3]);
-      const through = (s0 === root || fed.has(s0)) && (d0 === root || feeds.has(d0));
+      const through = webFlat || ((s0 === root || fed.has(s0)) && (d0 === root || feeds.has(d0)));
       const al = WEB_ALPHA * (0.6 + 0.4 * Math.abs(e[4]) / zhi) * Math.max(0.35, WEB_DECAY ** (Math.abs(e[5]) - 1)) * (through ? 1 : DEAD);
       p.set([a.x, a.y, a.z, b.x, b.y, b.z], i * 6); c.set([k.r * al, k.g * al, k.b * al, k.r * al, k.g * al, k.b * al], i * 6);
       // each touched neuron takes the colour of the hop that first reached it (edges arrive in hop order)
       const key = e[5] > 0 ? e[2] * N + e[3] : e[0] * N + e[1];
       if (!touched.has(key)) touched.set(key, [e[5] > 0 ? b : a, k]);
+      if (webFlat && !touched.has(s0)) touched.set(s0, [a, k]);
     }
     // dots too: a neuron the web runs through (read into and out of, or next to the open neuron) at full brightness
     const tp = [], tc = [];
     for (const [id, [v, k]] of touched) {
-      const f = (fed.has(id) || id === root) && (feeds.has(id) || id === root) ? 1 : DEAD * 3;
+      const f = webFlat || ((fed.has(id) || id === root) && (feeds.has(id) || id === root)) ? 1 : DEAD * 3;
       tp.push(v.x, v.y, v.z); tc.push(k.r * f, k.g * f, k.b * f);
     }
     webPtGeo.setAttribute("position", new THREE.Float32BufferAttribute(tp, 3));
@@ -517,8 +518,9 @@ export function createMap(canvas, labelsDiv, arch, cb) {
       buildWeb();
       refreshHighlights();
     },
-    // edges: Int16Array, 6 per link (src layer, src n, dst layer, dst n, 10 * z * sign, hop), or null to hide
-    setWeb(edges) { webEdges = edges; buildWeb(); refreshHighlights(); },
+    // edges: Int16Array, 6 per link (src layer, src n, dst layer, dst n, 10 * z * sign, hop), or null to hide;
+    // flat: no open neuron to trace from, so nothing is drawn as a dead end
+    setWeb(edges, { flat = false } = {}) { webEdges = edges; webFlat = flat; buildWeb(); refreshHighlights(); },
     enterLayer, exitLayer, viewLayer, setNotes,
     // centre the view on a neuron, keeping the zoom unless it is wider than a few layers' worth
     focusNeuron(layer, n) { if (layerMode === null) flyTo(neuronPos(layer, n), Math.min(curDist(), homeDist * 0.35)); },

@@ -299,6 +299,25 @@ class Runtime:
         push = [self._push_entry(pl, pn, d, m, (1,)) for pl, pn, d, m in pushes or []] or None
         return base, run(push, list(heads) if heads else None)
 
+    def attribution(self, text, chat=False, token=None, k=512, max_edges=3000):
+        """Neuron-level attribution graph for the next token after `text` (see attribution.build_graph); `token` is
+        the target's text (its first token), default the top prediction. Nodes carry their token's text and, for
+        neurons, the steer lens of the pole they fired on."""
+        from attribution import build_graph
+        self.ensure_loaded()
+        ids = self.chat_ids(text) if chat else self.tok(text).input_ids
+        tid = self.tok(token, add_special_tokens=False).input_ids[0] if token else None
+        with self.lock:
+            g = build_graph(self.lm, self.model.lm_head, ids, token=tid, k=k, max_edges=max_edges)
+        toks = [self.tok.decode([i]) for i in ids]
+        idx, v = self.steer_index() or self.lens_index(), self.vocab_strings()
+        for nd in g["nodes"]:
+            nd["tok"] = toks[nd["pos"]]
+            if nd["kind"] == "neuron" and idx is not None:
+                nd["lens"] = [v[t] for t in idx["up" if nd["act"] > 0 else "down"][nd["layer"], nd["n"], :5]]
+        g["tokens"], g["target"] = toks, self.tok.decode([g["token"]])
+        return g
+
     def con_index(self):
         """Precomputed connections (build_connections.py), loaded once."""
         if self._con_idx is None:

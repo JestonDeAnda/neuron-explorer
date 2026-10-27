@@ -19,6 +19,8 @@ steered chat, lens, connections and live inference over your own text.
   neurons with similar down-projection columns next to each other.
 - **list**: units ranked by word-cluster mass against random-direction controls; `lens` searches the steer and logit
   lenses for a token, `fires` runs your text through the model and filters neurons by activation.
+  `trace next token` (below `fires`) builds a neuron-level attribution graph for the next token (about 30 s) and draws
+  it on the map; see `attribution_memo.md`. `sweep/plot_attribution.py --text "…"` draws the same graph as an SVG.
 - **neuron**: steered rollouts per prompt and dose, a three-column multi-turn steered chat (−, 0, +), lens and
   connections, and a name.
 - **embeddings**: UMAP of a layer's rollouts, coloured by neuron, prompt, dose or kind.
@@ -57,5 +59,9 @@ and {free} × {+3}, plus one unsteered baseline per prompt.
 | `explorer/build_layout.py` | `explorer/cache/layout_writes.npz` |
 | `explorer/build_connections.py` | `explorer/cache/connections.npz`: each neuron's 24 strongest direct-path links up and down |
 | `sweep/capture_prefill.py` | `captures/<run>.mlp_in.npy`: MLP input at the last prompt token at the run's capture layers, steered |
+| `sweep/plot_attribution.py` | `runs/attribution/<prompt>.svg` and `.json`: attribution graph, circuit-tracer layout |
+| `sweep/check_attribution.py` | exactness checks of the attribution linearization |
+| `sweep/swap_state.py`, `sweep/swap_followup.py` | Texas → California swap at the city token (Dallas → Sacramento) and its controls |
+| `sweep/plot_interventions.py` | `runs/attribution/interventions/`: attribution graph of the intervened model for every swap experiment |
 
 `research_log.md` holds the findings and reasoning; `NOTES.md` the source notes.
