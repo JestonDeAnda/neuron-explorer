@@ -7,6 +7,9 @@ a steering push on neuron n adds to the residual stream.
 
     uv run python sweep/neuron_stats.py --model Qwen/Qwen3.5-4B --layers 22 --tokens 2000000 --out stats/q35-4b
 
+Pass --corpus-parquet to stream a local parquet `text` column instead of FineWeb + UltraChat. A local --model
+directory is loaded with local_files_only.
+
 Writes stats/q35-4b_L22.npz with
     pp_max, nn_max   largest positive activation in the (+,+) and (-,-) regimes          [I]
     pn_min, np_min   most negative activation in the (gate+, up-) and (gate-, up+) regimes [I]
@@ -16,16 +19,82 @@ Writes stats/q35-4b_L22.npz with
 """
 import argparse
 import itertools
+import json
 import os
 import time
+from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForImageTextToText, AutoTokenizer
 
 
-def text_stream(tok, seed):
+def _is_string_type(dtype):
+    if pa.types.is_string(dtype) or pa.types.is_large_string(dtype) or pa.types.is_string_view(dtype):
+        return True
+    if pa.types.is_dictionary(dtype):
+        return _is_string_type(dtype.value_type)
+    return False
+
+
+def _model_arg(value):
+    """Accept a hub id, or an on-disk model directory with config and tokenizer."""
+    path = Path(value)
+    if not path.is_absolute() and not path.exists():
+        return value
+    if not path.exists():
+        raise argparse.ArgumentTypeError(f"{value}: path not found")
+    if not path.is_dir():
+        raise argparse.ArgumentTypeError(f"{value} is not a directory")
+    config_path = path / "config.json"
+    if not config_path.is_file():
+        raise argparse.ArgumentTypeError(f"{value} is missing config.json")
+    if not (path / "tokenizer_config.json").is_file():
+        raise argparse.ArgumentTypeError(f"{value} is missing tokenizer files")
+    try:
+        with config_path.open(encoding="utf-8") as handle:
+            json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"{value}: invalid config.json ({exc})") from exc
+    return value
+
+
+def _parquet_arg(value):
+    """Accept a parquet file whose `text` column is a string (or dictionary-encoded string)."""
+    path = Path(value)
+    if not path.exists():
+        raise argparse.ArgumentTypeError(f"{value}: path not found")
+    if not path.is_file():
+        raise argparse.ArgumentTypeError(f"{value} is not a parquet file")
+    try:
+        schema = pq.read_schema(path)
+    except Exception as exc:
+        raise argparse.ArgumentTypeError(f"{value}: unreadable parquet ({exc})") from exc
+    if "text" not in schema.names:
+        found = ", ".join(schema.names) or "(none)"
+        raise argparse.ArgumentTypeError(f"{value}: missing text column; columns: {found}")
+    dtype = schema.field("text").type
+    if not _is_string_type(dtype):
+        raise argparse.ArgumentTypeError(f"{value}: text column must be string, got {dtype}")
+    return value
+
+
+def iter_parquet_text(path, batch_size=65536):
+    """Yield non-null `text` values in file order, without reading the whole table."""
+    parquet_file = pq.ParquetFile(path)
+    for batch in parquet_file.iter_batches(batch_size=batch_size, columns=["text"]):
+        for value in batch.column("text").to_pylist():
+            if value is not None:
+                yield value
+
+
+def text_stream(tok, seed, corpus_parquet=None):
+    if corpus_parquet is not None:
+        yield from iter_parquet_text(corpus_parquet)
+        return
     web = load_dataset("HuggingFaceFW/fineweb-edu", "sample-10BT", split="train", streaming=True).shuffle(seed=seed)
     chat = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft", streaming=True).shuffle(seed=seed)
     for w, c in zip(web, chat):
@@ -33,11 +102,11 @@ def text_stream(tok, seed):
         yield tok.apply_chat_template(c["messages"], tokenize=False, enable_thinking=False)
 
 
-def windows(tok, seq_len, batch, seed):
+def windows(tok, seq_len, batch, seed, corpus_parquet=None):
     """Packs documents (EOS-separated) into [batch, seq_len] token windows."""
     buf = []
     eos = tok.eos_token_id
-    for text in text_stream(tok, seed):
+    for text in text_stream(tok, seed, corpus_parquet=corpus_parquet):
         buf.extend(tok(text, add_special_tokens=False)["input_ids"] + [eos])
         while len(buf) >= seq_len * batch:
             chunk, buf = buf[: seq_len * batch], buf[seq_len * batch :]
@@ -68,20 +137,29 @@ class RegimeStats:
         self.np_min = torch.minimum(self.np_min, torch.where(~gp & up_, a, pinf).amin(0))
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
+    ap.add_argument("--model", default="Qwen/Qwen3.5-4B", type=_model_arg)
     ap.add_argument("--layers", default="22", help="comma-separated decoder layer indices")
     ap.add_argument("--tokens", type=int, default=2_000_000)
     ap.add_argument("--seq-len", type=int, default=1024)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="stats/q35-4b")
-    a = ap.parse_args()
+    ap.add_argument("--corpus-parquet", default=None, type=_parquet_arg,
+                    help="local parquet file with a string text column; replaces FineWeb + UltraChat")
+    return ap
+
+
+def main():
+    a = build_parser().parse_args()
     layers = [int(x) for x in a.layers.split(",")]
 
-    tok = AutoTokenizer.from_pretrained(a.model)
-    model = AutoModelForImageTextToText.from_pretrained(a.model, dtype=torch.bfloat16, device_map="cuda").eval()
+    local_files_only = os.path.isdir(a.model)
+    model_ref = os.path.abspath(a.model) if local_files_only else a.model
+    tok = AutoTokenizer.from_pretrained(model_ref, local_files_only=local_files_only)
+    model = AutoModelForImageTextToText.from_pretrained(
+        model_ref, dtype=torch.bfloat16, device_map="cuda", local_files_only=local_files_only).eval()
     lm = model.model.language_model
     lm.layers = lm.layers[: max(layers) + 1]  # nothing past the deepest target layer is needed
 
@@ -97,7 +175,8 @@ def main():
     n_steps = -(-a.tokens // (a.seq_len * a.batch))
     t0 = time.time()
     with torch.inference_mode():
-        for step, ids in enumerate(itertools.islice(windows(tok, a.seq_len, a.batch, a.seed), n_steps)):
+        for step, ids in enumerate(itertools.islice(
+                windows(tok, a.seq_len, a.batch, a.seed, corpus_parquet=a.corpus_parquet), n_steps)):
             lm(input_ids=ids.cuda(), use_cache=False)
             if step % 10 == 0 or step == n_steps - 1:
                 done = (step + 1) * a.seq_len * a.batch
