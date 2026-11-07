@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
+import tempfile
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -132,7 +136,7 @@ def save_stats(path: str, stats: SiteStats, config: dict) -> None:
         }
         for site in stats.sites
     ]
-    np.savez(
+    _savez_locally(
         path,
         pp_max=np.asarray(stats.pp_max),
         nn_max=np.asarray(stats.nn_max),
@@ -143,6 +147,31 @@ def save_stats(path: str, stats: SiteStats, config: dict) -> None:
         sites_json=np.array(json.dumps(meta)),
         config_json=np.array(json.dumps(config)),
     )
+
+
+def _savez_locally(path: str, **arrays) -> None:
+    """Assemble the zip on local disk, then copy it. OSS FUSE rejects zip seeks."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix="looped-stats-", suffix=".npz")
+    os.close(fd)
+    try:
+        np.savez(temporary, **arrays)
+        shutil.copyfile(temporary, destination)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def load_compact_arrays(path: str) -> dict[str, np.ndarray]:
+    """Copy an npz locally before opening it. Zip readers seek, and OSS does not."""
+    fd, temporary = tempfile.mkstemp(prefix="looped-stats-", suffix=".npz")
+    os.close(fd)
+    try:
+        shutil.copyfile(path, temporary)
+        with np.load(temporary) as data:
+            return {name: np.array(data[name], copy=True) for name in data.files}
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def iter_text_batches(tokenizer, path, text_field: str):

@@ -18,6 +18,8 @@ from sweep.looped_smoke import (
     build_summary,
     prepare_checkpoint_config,
     run_smoke,
+    stabilize_low_precision_attention,
+    validate_full_occupancy,
     validate_observer_equivalence,
 )
 
@@ -173,6 +175,68 @@ class LoopedSmokeTests(unittest.TestCase):
             validate_observer_equivalence(
                 adapt(ChangingNanLM(), family="ouro"), torch.tensor([[1, 2]])
             )
+
+    def test_bf16_occupancy_accepts_gemm_rounding_when_activation_delta_is_exact(self):
+        class WideMLP(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.gate_proj = nn.Linear(32, 8192, bias=False)
+                self.up_proj = nn.Linear(32, 8192, bias=False)
+                self.down_proj = nn.Linear(8192, 32, bias=False)
+
+            def forward(self, hidden):
+                gate = torch.nn.functional.silu(self.gate_proj(hidden))
+                return self.down_proj(gate * self.up_proj(hidden))
+
+        class WideBlock(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.mlp = WideMLP()
+
+            def forward(self, hidden):
+                return self.mlp(hidden)
+
+        class WideLM(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model = nn.Module()
+                self.model.embed_tokens = nn.Embedding(16, 32)
+                self.model.layers = nn.ModuleList([WideBlock()])
+                self.model.total_ut_steps = 2
+                self.lm_head = nn.Linear(32, 16, bias=False)
+
+            def forward(self, input_ids, use_cache=False, **kwargs):
+                del use_cache, kwargs
+                hidden = self.model.embed_tokens(input_ids)
+                for _ in range(self.model.total_ut_steps):
+                    hidden = self.model.layers[0](hidden)
+                return SimpleNamespace(logits=self.lm_head(hidden))
+
+        torch.manual_seed(0)
+        model = WideLM().to(torch.bfloat16)
+        with torch.no_grad():
+            model.model.layers[0].mlp.down_proj.weight.normal_(0, 0.02)
+        adapter = adapt(model, family="ouro")
+        result = validate_full_occupancy(
+            adapter, torch.randint(0, 16, (4, 2)), adapter.sites[0], adapter.sites[1],
+            cuda=NoCuda(),
+        )
+        self.assertEqual(result["rows_verified"], 4)
+        self.assertTrue(result["selected_delta_matches_write_column"])
+
+    def test_low_precision_causal_mask_keeps_zeros_and_replaces_dtype_minimum(self):
+        class Masked(nn.Module):
+            def _update_causal_mask(self, dtype):
+                mask = torch.zeros(2, 2, dtype=dtype)
+                mask[0, 1] = torch.finfo(dtype).min
+                return mask
+
+        model = Masked()
+        stabilize_low_precision_attention(model)
+        mask = model._update_causal_mask(torch.bfloat16)
+        self.assertEqual(float(mask[0, 0]), 0)
+        self.assertTrue(torch.isfinite(mask).all())
+        self.assertLess(float(mask[0, 1]), -100)
 
     def test_requested_batch_is_fully_occupied_and_summary_is_structured(self):
         with tempfile.TemporaryDirectory() as directory:

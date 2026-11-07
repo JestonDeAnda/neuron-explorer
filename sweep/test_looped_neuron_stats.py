@@ -24,6 +24,7 @@ from sweep.looped_neuron_stats import (
     collect_site_stats,
     iter_parquet_batches,
     iter_text_batches,
+    load_compact_arrays,
     parse_args,
     resolve_run,
     save_stats,
@@ -362,6 +363,23 @@ class LoopedNeuronStatsTests(unittest.TestCase):
                 {"kind": "layer", "physical_index": 0, "recurrence": 1, "virtual_index": 1},
             ])
             self.assertEqual(json.loads(saved["config_json"].item()), config)
+            seen = []
+            original_load = np.load
+
+            def local_only(file, *args, **kwargs):
+                seen.append(str(file))
+                if Path(str(file)).resolve() == Path(path).resolve():
+                    raise OSError(22, "Invalid argument")
+                return original_load(file, *args, **kwargs)
+
+            np.load = local_only
+            try:
+                arrays = load_compact_arrays(path)
+            finally:
+                np.load = original_load
+            self.assertTrue(seen)
+            self.assertNotEqual(Path(seen[0]).resolve(), Path(path).resolve())
+            np.testing.assert_allclose(arrays["pp_max"], stats.pp_max)
 
     def test_text_and_parquet_batches_and_run_controls(self):
         tokenizer = _CharTokenizer()

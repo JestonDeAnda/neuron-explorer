@@ -24,6 +24,7 @@ import numpy as np
 import torch
 
 from sweep.looped_models import BatchEdits, ExecutionSite, adapt
+from sweep.looped_neuron_stats import load_compact_arrays
 
 PROMPTS = {
     "who": "Who are you?",
@@ -53,20 +54,20 @@ class CompactStats:
 
 def load_compact_stats(path: str) -> CompactStats:
     """Read regime quantiles and site metadata. Does not read a checkpoint."""
-    with np.load(path) as data:
-        meta = json.loads(data["sites_json"].item())
-        config = json.loads(data["config_json"].item())
-        sites = tuple(
-            ExecutionSite(
-                str(item["kind"]),
-                int(item["physical_index"]),
-                int(item["recurrence"]),
-                int(item["virtual_index"]),
-            )
-            for item in meta
+    data = load_compact_arrays(path)
+    meta = json.loads(data["sites_json"].item())
+    config = json.loads(data["config_json"].item())
+    sites = tuple(
+        ExecutionSite(
+            str(item["kind"]),
+            int(item["physical_index"]),
+            int(item["recurrence"]),
+            int(item["virtual_index"]),
         )
-        resid = np.array(data["resid_norm_q10_50_90"], dtype=np.float64, copy=True)
-        abs_max = np.array(data["abs_max"], dtype=np.float64, copy=True)
+        for item in meta
+    )
+    resid = np.array(data["resid_norm_q10_50_90"], dtype=np.float64, copy=True)
+    abs_max = np.array(data["abs_max"], dtype=np.float64, copy=True)
     return CompactStats(sites=sites, resid_p50=resid[:, 1], abs_max=abs_max, config=config)
 
 
