@@ -19,6 +19,7 @@ from sweep.looped_smoke import (
     prepare_checkpoint_config,
     run_smoke,
     stabilize_low_precision_attention,
+    trace_nonfinite,
     validate_full_occupancy,
     validate_observer_equivalence,
 )
@@ -223,6 +224,47 @@ class LoopedSmokeTests(unittest.TestCase):
         )
         self.assertEqual(result["rows_verified"], 4)
         self.assertTrue(result["selected_delta_matches_write_column"])
+
+    def test_nonfinite_trace_names_the_first_bad_stage_and_mask(self):
+        class Inner(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.embed_tokens = nn.Embedding(8, 4)
+                self.layers = nn.ModuleList([nn.Identity(), nn.Identity()])
+
+            def _update_causal_mask(self):
+                mask = torch.zeros(1, 1, dtype=torch.bfloat16)
+                mask[0, 0] = torch.finfo(torch.bfloat16).min
+                return mask
+
+            def forward(self, input_ids):
+                hidden = self.embed_tokens(input_ids)
+                self._update_causal_mask()
+                hidden = self.layers[0](hidden)
+                hidden = self.layers[1](hidden)
+                hidden = hidden.clone()
+                hidden[..., 0] = torch.nan
+                return hidden
+
+        class Outer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model = Inner()
+                self.lm_head = nn.Identity()
+                self.config = SimpleNamespace(_attn_implementation="sdpa")
+
+            def forward(self, input_ids, use_cache=False):
+                del use_cache
+                hidden = self.model(input_ids)
+                return SimpleNamespace(logits=self.lm_head(hidden))
+
+        model = stabilize_low_precision_attention(Outer())
+        report = trace_nonfinite(model, torch.tensor([[1, 2]]))
+        self.assertEqual(report["attn_implementation"], "sdpa")
+        self.assertEqual(report["first_nonfinite"], "lm_head#1")
+        self.assertTrue(report["mask"]["low_precision_safe"])
+        self.assertGreater(report["mask"]["finite"], 0)
+        self.assertGreater(report["mask"]["min"], -1.0e5)
 
     def test_low_precision_causal_mask_keeps_zeros_and_replaces_dtype_minimum(self):
         class Masked(nn.Module):

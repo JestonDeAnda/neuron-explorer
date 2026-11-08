@@ -172,7 +172,83 @@ def stabilize_low_precision_attention(model):
     return model
 
 
-def load_local_model(model_path: str):
+def finite_stats(tensor: torch.Tensor) -> dict:
+    """Count finite values without letting a NaN contaminate min or max."""
+    values = tensor.detach()
+    finite = torch.isfinite(values)
+    count = int(finite.sum())
+    stats = {"finite": count, "numel": int(values.numel()), "dtype": str(values.dtype).removeprefix("torch.")}
+    if count:
+        kept = values[finite].float()
+        stats["min"] = float(kept.min())
+        stats["max"] = float(kept.max())
+    return stats
+
+
+def trace_nonfinite(model, input_ids: torch.Tensor) -> dict:
+    """Record the first non-finite stage and the causal mask actually used."""
+    records = []
+    counts: dict[str, int] = {}
+
+    def remember(name, output):
+        tensor = output
+        if isinstance(output, (tuple, list)) and output and torch.is_tensor(output[0]):
+            tensor = output[0]
+        if not torch.is_tensor(tensor):
+            return
+        counts[name] = counts.get(name, 0) + 1
+        records.append({"name": f"{name}#{counts[name]}", **finite_stats(tensor)})
+
+    handles = []
+    inner = getattr(model, "model", model)
+    embed = getattr(inner, "embed_tokens", None)
+    if isinstance(embed, torch.nn.Module):
+        handles.append(embed.register_forward_hook(lambda _m, _i, out: remember("embed", out)))
+    for index, layer in enumerate(getattr(inner, "layers", ())):
+        handles.append(layer.register_forward_hook(
+            lambda _m, _i, out, index=index: remember(f"layer{index}", out)
+        ))
+    head = getattr(model, "lm_head", None)
+    if isinstance(head, torch.nn.Module):
+        handles.append(head.register_forward_hook(lambda _m, _i, out: remember("lm_head", out)))
+
+    mask_stats = None
+    original = getattr(inner, "_update_causal_mask", None)
+
+    def wrapped_mask(*args, _original=original, **kwargs):
+        nonlocal mask_stats
+        mask = _original(*args, **kwargs)
+        if mask_stats is None:
+            if torch.is_tensor(mask):
+                mask_stats = finite_stats(mask)
+            else:
+                mask_stats = {"none": True}
+            mask_stats["low_precision_safe"] = bool(getattr(_original, "_low_precision_safe", False))
+        return mask
+
+    if original is not None:
+        inner._update_causal_mask = wrapped_mask
+    try:
+        with torch.inference_mode():
+            output = model(input_ids, use_cache=False)
+        logits = output.logits if hasattr(output, "logits") else output
+        if torch.is_tensor(logits):
+            records.append({"name": "logits", **finite_stats(logits)})
+    finally:
+        for handle in handles:
+            handle.remove()
+        if original is not None:
+            inner._update_causal_mask = original
+    first_bad = next((row["name"] for row in records if row["finite"] < row["numel"]), None)
+    return {
+        "attn_implementation": getattr(getattr(model, "config", None), "_attn_implementation", None),
+        "mask": mask_stats,
+        "first_nonfinite": first_bad,
+        "stages": records,
+    }
+
+
+def load_local_model(model_path: str, attn_implementation: str | None = None):
     """Load a local checkpoint in the exact production configuration."""
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for production smoke validation")
@@ -193,15 +269,18 @@ def load_local_model(model_path: str):
         _legacy_rope_compat(ROPE_INIT_FUNCTIONS),
         _legacy_tied_weights_compat(PreTrainedModel),
     ):
+        load_kwargs = {
+            "config": config, "trust_remote_code": True, "local_files_only": True,
+        }
+        if attn_implementation:
+            load_kwargs["attn_implementation"] = attn_implementation
         try:
             model = AutoModelForCausalLM.from_pretrained(
-                str(path), config=config, trust_remote_code=True, local_files_only=True,
-                dtype=torch.bfloat16,
+                str(path), dtype=torch.bfloat16, **load_kwargs,
             )
         except TypeError:
             model = AutoModelForCausalLM.from_pretrained(
-                str(path), config=config, trust_remote_code=True, local_files_only=True,
-                torch_dtype=torch.bfloat16,
+                str(path), torch_dtype=torch.bfloat16, **load_kwargs,
             )
     model.to("cuda")
     model.eval()
