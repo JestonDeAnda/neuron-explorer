@@ -144,6 +144,51 @@ def _legacy_rope_compat(rope_functions) -> Iterator[None]:
             del rope_functions["default"]
 
 
+def restore_legacy_rope_buffers(model) -> list[str]:
+    """Rebuild RoPE frequencies that Transformers 5 leaves uninitialized.
+
+    Current Transformers recomputes ``inv_freq`` only for rotary modules that
+    also expose ``original_inv_freq``. Older remote code computes it in
+    ``__init__`` and marks it non-persistent, so a meta-device load keeps
+    uninitialized memory. The standard formula is ``1 / base ** (i / dim)``.
+    """
+    restored = []
+    for name, module in model.named_modules():
+        if "RotaryEmbedding" not in type(module).__name__ or hasattr(module, "original_inv_freq"):
+            continue
+        if not hasattr(module, "base") or not hasattr(module, "dim"):
+            raise RuntimeError(
+                f"{name or type(module).__name__} has no base and dim; cannot rebuild inv_freq"
+            )
+        inv_freq = getattr(module, "inv_freq", None)
+        if not torch.is_tensor(inv_freq):
+            raise RuntimeError(f"{name or type(module).__name__} is missing inv_freq")
+        base = module.base.detach().float() if torch.is_tensor(module.base) else float(module.base)
+        exponents = torch.arange(0, int(module.dim), 2, dtype=torch.float32) / float(module.dim)
+        recomputed = (1.0 / (base ** exponents)).to(dtype=inv_freq.dtype, device=inv_freq.device)
+        if recomputed.shape != inv_freq.shape:
+            raise RuntimeError(
+                f"{name or type(module).__name__} inv_freq shape {tuple(inv_freq.shape)} "
+                f"does not match {tuple(recomputed.shape)}"
+            )
+        inv_freq.copy_(recomputed)
+        restored.append(name or type(module).__name__)
+
+    for name, module in model.named_modules():
+        prefix = f"{name}." if name else ""
+        for buffer_name, buffer in module.named_buffers(recurse=False):
+            if buffer is None:
+                continue
+            qualified = f"{prefix}{buffer_name}"
+            if not torch.isfinite(buffer).all():
+                raise RuntimeError(f"non-finite buffer {qualified}")
+            if buffer_name == "inv_freq":
+                values = buffer.detach().float()
+                if (values <= 0).any() or (values > 1).any():
+                    raise RuntimeError(f"inv_freq outside (0, 1] at {qualified}")
+    return restored
+
+
 def stabilize_low_precision_attention(model):
     """Keep bf16/fp16 causal masks finite.
 
@@ -282,6 +327,7 @@ def load_local_model(model_path: str, attn_implementation: str | None = None):
             model = AutoModelForCausalLM.from_pretrained(
                 str(path), torch_dtype=torch.bfloat16, **load_kwargs,
             )
+    restore_legacy_rope_buffers(model)
     model.to("cuda")
     model.eval()
     stabilize_low_precision_attention(model)

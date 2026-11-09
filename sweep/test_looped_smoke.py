@@ -17,6 +17,7 @@ from sweep.looped_smoke import (
     aggregate_nvidia_csv,
     build_summary,
     prepare_checkpoint_config,
+    restore_legacy_rope_buffers,
     run_smoke,
     stabilize_low_precision_attention,
     trace_nonfinite,
@@ -125,6 +126,60 @@ class LoopedSmokeTests(unittest.TestCase):
         self.assertEqual(
             config.rope_scaling, {"rope_type": "proportional", "factor": 1.0}
         )
+
+    def test_uninitialized_legacy_rope_buffer_is_recomputed(self):
+        class LegacyRotaryEmbedding(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.base = 10000.0
+                self.dim = 8
+                self.register_buffer(
+                    "inv_freq", torch.tensor([float("nan"), 1.0e20, -3.0, 0.5]), persistent=False
+                )
+
+        class ModernRotary(nn.Module):
+            def __init__(self):
+                super().__init__()
+                sentinel = torch.tensor([1.0, 0.5, 0.25, 0.125])
+                self.register_buffer("inv_freq", sentinel.clone())
+                self.register_buffer("original_inv_freq", sentinel.clone())
+
+        class Holder(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.old = LegacyRotaryEmbedding()
+                self.modern = ModernRotary()
+
+        model = Holder()
+        restored = restore_legacy_rope_buffers(model)
+        expected = 1.0 / (10000.0 ** (torch.arange(0, 8, 2).float() / 8))
+        self.assertEqual(restored, ["old"])
+        self.assertTrue(torch.allclose(model.old.inv_freq, expected))
+        self.assertTrue(torch.equal(
+            model.modern.inv_freq, torch.tensor([1.0, 0.5, 0.25, 0.125])
+        ))
+
+    def test_rope_repair_rejects_a_buffer_that_stays_nonfinite(self):
+        class BrokenRotaryEmbedding(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.base = 10000.0
+                self.dim = 4
+                self.register_buffer("inv_freq", torch.tensor([float("nan"), 4.0]), persistent=False)
+                self.register_buffer("scratch", torch.tensor([float("nan")]))
+
+        with self.assertRaisesRegex(RuntimeError, "scratch"):
+            restore_legacy_rope_buffers(BrokenRotaryEmbedding())
+
+    def test_rope_repair_rejects_inv_freq_outside_unit_interval(self):
+        class Modern(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("inv_freq", torch.tensor([1.0e20]))
+                self.register_buffer("original_inv_freq", torch.tensor([1.0]))
+
+        with self.assertRaisesRegex(RuntimeError, "inv_freq"):
+            restore_legacy_rope_buffers(Modern())
 
     def test_legacy_tied_weight_list_is_converted_to_alias_mapping(self):
         class LegacyTiedModel(nn.Module):
