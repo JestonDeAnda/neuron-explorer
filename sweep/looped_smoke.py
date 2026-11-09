@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import time
 import traceback
 from contextlib import contextmanager
@@ -215,6 +217,52 @@ def stabilize_low_precision_attention(model):
         wrapped._low_precision_safe = True
         owner._update_causal_mask = wrapped
     return model
+
+
+def _drop_page_cache(handle) -> None:
+    advise = getattr(os, "posix_fadvise", None)
+    flag = getattr(os, "POSIX_FADV_DONTNEED", None)
+    if advise is None or flag is None:
+        return
+    advise(handle.fileno(), 0, 0, flag)
+
+
+def stage_directory(source: str, destination: str, *, chunk_bytes: int = 8 * 1024 * 1024) -> None:
+    """Copy a checkpoint without keeping both sides in the page cache.
+
+    ``cp`` of Huginn's 15GB snapshot caches the read and the write. On a 32Gi
+    cgroup that is enough for the kernel to kill the copy before the model loads.
+    """
+    src = Path(source)
+    dst = Path(destination)
+    if not src.is_dir():
+        raise ValueError(f"checkpoint directory does not exist: {source}")
+    if dst.exists():
+        raise ValueError(f"refusing to stage into an existing directory: {destination}")
+    if chunk_bytes < 1:
+        raise ValueError("chunk_bytes must be positive")
+    dst.mkdir(parents=True)
+    for path in sorted(src.rglob("*")):
+        target = dst / path.relative_to(src)
+        if path.is_symlink():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(os.readlink(path))
+            continue
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("rb") as incoming, target.open("wb") as outgoing:
+            while True:
+                block = incoming.read(chunk_bytes)
+                if not block:
+                    break
+                outgoing.write(block)
+                _drop_page_cache(incoming)
+                _drop_page_cache(outgoing)
+            outgoing.flush()
+            os.fsync(outgoing.fileno())
+        shutil.copystat(path, target, follow_symlinks=False)
 
 
 def finite_stats(tensor: torch.Tensor) -> dict:

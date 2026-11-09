@@ -8,6 +8,7 @@ PYTHON=${PYTHON:-python}
 MAX_TOKENS=${MAX_TOKENS:-8}
 SEED=${SEED:-0}
 HUGINN_RECURRENCES=${HUGINN_RECURRENCES:-32}
+FAMILIES=${FAMILIES:-ouro,nanbeige,huginn}
 
 OURO_NAS=${OURO_NAS:-/mnt/nas-save/nas-save/wangjunqi/ouro/models/Ouro-2.6B}
 NANBEIGE_NAS=${NANBEIGE_NAS:-/mnt/nas-save/nas-save/wangjunqi/j-lens-on-loop-nanbeige/models/Nanbeige4.2-3B}
@@ -20,8 +21,7 @@ mkdir -p "$RUN_DIR" "$LOCAL_ROOT"
 stage_model() {
   local source="$1" destination="$2"
   rm -rf -- "$destination"
-  mkdir -p "$destination"
-  cp -a "$source"/. "$destination"/
+  (cd "$ROOT_DIR" && "$PYTHON" -c 'from sweep.looped_smoke import stage_directory; import sys; stage_directory(sys.argv[1], sys.argv[2])' "$source" "$destination")
 }
 
 if [[ "${CHECK_ONLY:-0}" == "1" ]]; then
@@ -62,6 +62,10 @@ specs=(
 failed=0
 for spec in "${specs[@]}"; do
   IFS='|' read -r family nas_model batch recurrences <<< "$spec"
+  case ",${FAMILIES}," in
+    *",${family},"*) ;;
+    *) continue ;;
+  esac
   model_dir="$RUN_DIR/$family"
   mkdir -p "$model_dir"
   local_model="$LOCAL_ROOT/$family"
@@ -102,7 +106,7 @@ for spec in "${specs[@]}"; do
   cleanup_local
  done
 
-RUN_DIR="$RUN_DIR" "$PYTHON" - <<'PY'
+RUN_DIR="$RUN_DIR" FAMILIES="$FAMILIES" "$PYTHON" - <<'PY'
 import json
 import os
 from pathlib import Path
@@ -110,7 +114,10 @@ from sweep.looped_smoke import aggregate_nvidia_csv, build_summary
 
 root = Path(os.environ["RUN_DIR"])
 records = []
-for family, requested_batch in (("ouro", 256), ("nanbeige", 256), ("huginn", 64)):
+selected = [item for item in os.environ.get("FAMILIES", "ouro,nanbeige,huginn").split(",") if item]
+batches = {"ouro": 256, "nanbeige": 256, "huginn": 64}
+for family in selected:
+    requested_batch = batches[family]
     directory = root / family
     smoke_path = directory / "smoke.json"
     try:

@@ -19,6 +19,7 @@ from sweep.looped_smoke import (
     prepare_checkpoint_config,
     restore_legacy_rope_buffers,
     run_smoke,
+    stage_directory,
     stabilize_low_precision_attention,
     trace_nonfinite,
     validate_full_occupancy,
@@ -399,6 +400,8 @@ class LoopedSmokeTests(unittest.TestCase):
         self.assertIn("j-lens-on-loop-nanbeige/models/Nanbeige4.2-3B", text)
         self.assertIn("j-lens-on-loop/models/huginn-0125", text)
         self.assertIn("CHECK_ONLY", text)
+        self.assertIn("FAMILIES", text)
+        self.assertIn("stage_directory", text)
         self.assertIn("summary.json", text)
         self.assertIn("sleep 1", text)
         failed = build_summary([
@@ -407,6 +410,21 @@ class LoopedSmokeTests(unittest.TestCase):
         ])
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["models_passed"], 1)
+
+    def test_stage_directory_copies_bytes_and_rejects_an_existing_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "src" / "nested"
+            source.mkdir(parents=True)
+            payload = b"weights" * 5000
+            (source / "model.bin").write_bytes(payload)
+            (root / "src" / "config.json").write_text("{}\n", encoding="utf-8")
+            destination = root / "dst"
+            stage_directory(str(root / "src"), str(destination), chunk_bytes=1024)
+            self.assertEqual((destination / "nested" / "model.bin").read_bytes(), payload)
+            self.assertEqual((destination / "config.json").read_text(encoding="utf-8"), "{}\n")
+            with self.assertRaisesRegex(ValueError, "existing"):
+                stage_directory(str(root / "src"), str(destination), chunk_bytes=1024)
 
 
 if __name__ == "__main__":
