@@ -1,6 +1,6 @@
-"""Neuron explorer server: sweep data, names, embeddings, and the live model.
+"""Importable neuron explorer server: app factory and default ASGI app.
 
-    uv run python -m neuron_explorer.explorer.server  # http://localhost:8791
+Run with ``uv run python scripts/serve_explorer.py`` or ``uv run neuron-explorer``.
 """
 import asyncio
 import atexit
@@ -17,7 +17,6 @@ from importlib.resources import as_file, files
 from typing import Any, Literal
 
 import numpy as np
-import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -1265,7 +1264,3 @@ def create_app(paths: ProjectPaths | None = None, *, port: int = PORT) -> FastAP
 
 
 app = _create_app(_fallback_state)
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=PORT)

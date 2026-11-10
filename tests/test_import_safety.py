@@ -48,4 +48,30 @@ def test_package_modules_do_not_own_cli_parsing_or_sys_argv():
                 and node.attr == "argv"
             ):
                 violations.append(f"{path}: sys.argv")
+            if (
+                isinstance(node, ast.If)
+                and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name)
+                and node.test.left.id == "__name__"
+                and any(
+                    isinstance(comparator, ast.Constant)
+                    and comparator.value == "__main__"
+                    for comparator in node.test.comparators
+                )
+            ):
+                violations.append(f"{path}: __main__ workflow")
     assert not violations, "\n".join(violations)
+
+
+def test_package_command_examples_point_to_scripts():
+    root = Path(next(iter(neuron_explorer.__path__)))
+    references = {
+        "explorer/build_connections.py": "scripts/build_connections.py",
+        "explorer/build_layout.py": "scripts/build_layout.py",
+        "explorer/build_embeddings.py": "scripts/build_embeddings.py",
+        "explorer/server.py": "scripts/serve_explorer.py",
+    }
+    for relative, command in references.items():
+        text = (root / relative).read_text(encoding="utf-8")
+        assert command in text
+        assert "python -m neuron_explorer" not in text

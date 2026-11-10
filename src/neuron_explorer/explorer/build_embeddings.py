@@ -1,6 +1,6 @@
 """Embeds every rollout of a sweep run and lays them out in 2D with UMAP, for the explorer's embeddings view.
 
-    uv run python -m neuron_explorer.explorer.build_embeddings runs/mainrel-e2e.jsonl
+    uv run python scripts/build_embeddings.py runs/mainrel-e2e.jsonl
 
 Writes <run>.emb.npy (normalized sentence embeddings, one row per jsonl line) and <run>.umap.json with parallel arrays:
 x, y, row (jsonl line index), kind, neuron, prompt, dose.

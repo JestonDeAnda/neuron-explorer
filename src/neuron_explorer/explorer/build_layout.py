@@ -3,7 +3,7 @@ together. Embeds each neuron by its down_proj column ("writes": the direction it
 gate and up rows ("reads"), cosine-normalised, PCA to 50 dims, UMAP to 2D, then snaps to the grid: sort by y into
 rows of 96, then by x within each row.
 
-    uv run python -m neuron_explorer.explorer.build_layout --kind writes
+    uv run python scripts/build_layout.py --kind writes
 
 Writes cache/layout_<kind>.npz: cell[L, N] (int16, row * 96 + col for neuron n of layer L).
 """

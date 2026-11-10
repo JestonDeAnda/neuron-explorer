@@ -5,7 +5,7 @@ pre-MLP norm weight of layer j. Neuron A's downstream links in layer j are colum
 B's upstream links in layer i are row B of P, |P| z-scored over A. Each neuron keeps its k strongest links per side
 across all layers, with sign(P).
 
-    uv run python -m neuron_explorer.explorer.build_connections  # CUDA, about 5 min on a 4090
+    uv run python scripts/build_connections.py  # CUDA, about 5 min on a 4090
 
 Writes cache/connections.npz: {down,up}_layer [L, N, k] int8, {down,up}_n int16, {down,up}_z float16,
 {down,up}_sign int8.
@@ -19,10 +19,8 @@ import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 
-from neuron_explorer.paths import ProjectPaths
-
 def run_build_connections(options):
-    dev = "cuda" if torch.cudoptions.is_available() else "mps"
+    dev = "cuda" if torch.cuda.is_available() else "mps"
 
     root = snapshot_download(options.model, allow_patterns=["*.safetensors", "*.json"])
     index = json.load(open(os.path.join(root, "model.safetensors.index.json")))["weight_map"]
