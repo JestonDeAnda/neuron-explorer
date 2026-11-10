@@ -8,12 +8,14 @@ import argparse
 import json
 
 import numpy as np
+import torch
 from neuron_explorer.paths import ProjectPaths
 from neuron_explorer.sweep.interventions import (
     DALLAS,
     OTHERS,
     Model,
     attribution_group,
+    build_state_swap_experiments,
     load_vocabulary,
 )
 
@@ -77,7 +79,6 @@ def swap(M, max_layer, k, out):
         for l, n, a, inf in rows[:20]:
             print(f"  L{l} N{n} act {a:+.2f} infl {inf:.3f}", lens(l, n, a))
 
-    _, A = M.run(DALLAS, capture=True)
     _, B = M.run(OTHERS["San Francisco"], capture=True)
     results = []
 
@@ -89,28 +90,22 @@ def swap(M, max_layer, k, out):
         print(f"  {label:44s} Austin {r['Austin']:.3f}  Sacramento {r['Sacramento']:.3f}  ", r["top"][:4])
 
     print("\n== interventions at ' Dallas' (position %d); other positions untouched" % pd)
-    trial("baseline", [])
+    experiments = build_state_swap_experiments(
+        M,
+        B,
+        ps,
+        texas,
+        cal,
+        whole_layer_limits=(3, 5, 8, 12),
+    )
+    trial(experiments[0][0], experiments[0][2])
     sf8109 = float(B[5][ps, 8109])
     trial("L5 N8109 -> 0", [(5, pd, 8109, 0.0)])
     trial(f"L5 N8109 -> its SF value {sf8109:+.2f}", [(5, pd, 8109, sf8109)])
     trial("L5 N8109 -> +2.84 (sign flipped)", [(5, pd, 8109, 2.84)])
     trial("L4 N5319 -> 3 x SF value", [(4, pd, 5319, 3 * float(B[4][ps, 5319]))])
-    for m in (5, 10, 20, 40):
-        T = texas[:m]
-        trial(f"Texas top {m} -> 0", [(l, pd, n, 0.0) for l, n, _, _ in T])
-    for m in (5, 10, 20, 40):
-        for s in (1, 2, 4):
-            C = cal[:m]
-            trial(f"California top {m} -> {s} x SF value", [(l, pd, n, s * float(B[l][ps, n])) for l, n, _, _ in C])
-    for m in (5, 10, 20, 40):
-        for s in (1, 2, 4):
-            T, C = texas[:m], cal[:m]
-            e = {(l, n): 0.0 for l, n, _, _ in T}
-            e.update({(l, n): s * float(B[l][ps, n]) for l, n, _, _ in C})
-            trial(f"Texas top {m} -> 0, California top {m} -> {s} x", [(l, pd, n, x) for (l, n), x in e.items()])
-    for L in (3, 5, 8, 12):
-        trial(f"every MLP neuron L0-L{L} patched from SF", [(l, pd, n, float(B[l][ps, n]))
-                                                          for l in range(L + 1) for n in range(B[l].shape[1])])
+    for label, _, edits in experiments[1:]:
+        trial(label, edits)
     if out:
         json.dump({"texas": texas, "california": cal, "results": results}, open(out, "w"), ensure_ascii=False, indent=1)
         print(out)

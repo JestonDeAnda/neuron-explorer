@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 import numpy as np
@@ -127,6 +126,10 @@ def load_vocabulary(paths: ProjectPaths | None = None):
 vocab = load_vocabulary
 
 
+def _unit_pairs(group: Iterable[Sequence[object]]):
+    return [(int(row[0]), int(row[1])) for row in group]
+
+
 def city_token_position(tokenizer, text: str, city: str) -> int:
     """Return the last occurrence of the city's final token in ``text``."""
     ids = tokenizer(text).input_ids
@@ -141,7 +144,7 @@ def city_token_position(tokenizer, text: str, city: str) -> int:
 
 def build_state_swap_edits(
     target_position: int,
-    group: Iterable[tuple[int, int]],
+    group: Iterable[Sequence[object]],
     source_activations: Mapping[int, np.ndarray],
     source_position: int,
     scale: float = 1.0,
@@ -154,7 +157,7 @@ def build_state_swap_edits(
             neuron,
             scale * float(source_activations[layer][source_position, neuron]),
         )
-        for layer, neuron in group
+        for layer, neuron in _unit_pairs(group)
     ]
 
 
@@ -194,11 +197,14 @@ def build_state_swap_experiments(
     model,
     source_activations,
     source_position,
-    texas: Sequence[tuple[int, int]],
-    california: Sequence[tuple[int, int]],
+    texas: Sequence[Sequence[object]],
+    california: Sequence[Sequence[object]],
+    whole_layer_limits: Sequence[int] = (),
 ):
-    """Build the reusable core Dallas-to-California experiment matrix."""
+    """Build Dallas-to-California experiments from pairs or graph rows."""
     target_position = city_token_position(model.tok, DALLAS, "Dallas")
+    texas_pairs = _unit_pairs(texas)
+    california_pairs = _unit_pairs(california)
 
     def copied(group, scale):
         return build_state_swap_edits(
@@ -217,7 +223,7 @@ def build_state_swap_experiments(
                 DALLAS,
                 [
                     (layer, target_position, neuron, 0.0)
-                    for layer, neuron in texas[:count]
+                    for layer, neuron in texas_pairs[:count]
                 ],
             )
         )
@@ -226,7 +232,56 @@ def build_state_swap_experiments(
                 (
                     f"California top {count} -> {scale} x source",
                     DALLAS,
-                    copied(california[:count], scale),
+                    copied(california_pairs[:count], scale),
                 )
             )
+            combined = {
+                (layer, neuron): 0.0
+                for layer, neuron in texas_pairs[:count]
+            }
+            combined.update(
+                {
+                    (layer, neuron): scale
+                    * float(
+                        source_activations[layer][
+                            source_position, neuron
+                        ]
+                    )
+                    for layer, neuron in california_pairs[:count]
+                }
+            )
+            experiments.append(
+                (
+                    f"Texas top {count} -> 0, "
+                    f"California top {count} -> {scale} x",
+                    DALLAS,
+                    [
+                        (layer, target_position, neuron, value)
+                        for (layer, neuron), value in combined.items()
+                    ],
+                )
+            )
+    for max_layer in whole_layer_limits:
+        experiments.append(
+            (
+                f"every MLP neuron L0-L{max_layer} patched from source",
+                DALLAS,
+                [
+                    (
+                        layer,
+                        target_position,
+                        neuron,
+                        float(
+                            source_activations[layer][
+                                source_position, neuron
+                            ]
+                        ),
+                    )
+                    for layer in range(max_layer + 1)
+                    for neuron in range(
+                        source_activations[layer].shape[1]
+                    )
+                ],
+            )
+        )
     return experiments
