@@ -9,10 +9,20 @@ import json
 import os
 import sqlite3
 import threading
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import numpy as np
 import torch
 from transformers import AutoTokenizer, Qwen3_5ForConditionalGeneration
+
+from neuron_explorer.attribution import (
+    CacheCatalog,
+    NeuronCatalog,
+    annotate_graph,
+    build_graph,
+)
+from neuron_explorer.paths import ProjectPaths
 
 MODEL = os.environ.get("EXPLORER_MODEL", "Qwen/Qwen3.5-4B")
 NO_MODEL = bool(os.environ.get("EXPLORER_NO_MODEL"))  # cache-only: never download or load weights
@@ -24,14 +34,28 @@ REFERENCE_TEXT = (
 )
 
 
-CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+def annotate_attribution_graph(
+    graph: dict[str, Any],
+    *,
+    input_ids: Sequence[int],
+    decode: Callable[[Sequence[int]], str],
+    catalog: NeuronCatalog | None,
+) -> dict[str, Any]:
+    """Decode and catalog a raw attribution graph without constructing a runtime."""
+    tokens = [decode([token_id]) for token_id in input_ids]
+    target = decode([int(graph["token"])])
+    return annotate_graph(graph, tokens=tokens, target=target, catalog=catalog)
 
 
 class Runtime:
-    def __init__(self, stats_dir):
-        self.stats_dir = stats_dir
-        os.makedirs(CACHE, exist_ok=True)
-        self._db = sqlite3.connect(os.path.join(CACHE, "connections.sqlite"), check_same_thread=False)
+    def __init__(self, paths: ProjectPaths | None = None):
+        self.paths = paths or ProjectPaths.discover()
+        self.stats_dir = self.paths.stats
+        self.cache_dir = self.paths.cache
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._db = sqlite3.connect(
+            self.cache_dir / "connections.sqlite", check_same_thread=False
+        )
         self._db.execute("CREATE TABLE IF NOT EXISTS con (key TEXT PRIMARY KEY, val TEXT)")
         self._db_lock = threading.Lock()
         self._lens_idx = None
@@ -49,6 +73,16 @@ class Runtime:
         self._capture_from = 0
         self._capture_full = None
         self._lens_cache = {}
+        self.refresh_catalog()
+
+    def refresh_catalog(self) -> None:
+        """Reload annotation metadata after a cache-backed name change."""
+        self.catalog = CacheCatalog(
+            names_path=self.cache_dir / "names.json",
+            steer_path=self.cache_dir / "steer_index.npz",
+            vocab_path=self.cache_dir / "vocab.json",
+            logit_lens_path=self.cache_dir / "lens_index.npz",
+        )
 
     # ---------- loading ----------
     def ensure_loaded(self):
@@ -132,7 +166,7 @@ class Runtime:
     def layer_resid_p50(self, layer):
         if layer in self.resid_p50:
             return self.resid_p50[layer]
-        path = os.path.join(self.stats_dir, f"q35-4b_L{layer}.npz")
+        path = self.stats_dir / f"q35-4b_L{layer}.npz"
         if os.path.exists(path):
             v = float(np.load(path)["resid_norm_q10_50_90"][1])
         else:
@@ -303,25 +337,22 @@ class Runtime:
         """Neuron-level attribution graph for the next token after `text` (see attribution.build_graph); `token` is
         the target's text (its first token), default the top prediction. Nodes carry their token's text and, for
         neurons, the steer lens of the pole they fired on."""
-        from attribution import build_graph
         self.ensure_loaded()
         ids = self.chat_ids(text) if chat else self.tok(text).input_ids
         tid = self.tok(token, add_special_tokens=False).input_ids[0] if token else None
         with self.lock:
             g = build_graph(self.lm, self.model.lm_head, ids, token=tid, k=k, max_edges=max_edges)
-        toks = [self.tok.decode([i]) for i in ids]
-        idx, v = self.steer_index() or self.lens_index(), self.vocab_strings()
-        for nd in g["nodes"]:
-            nd["tok"] = toks[nd["pos"]]
-            if nd["kind"] == "neuron" and idx is not None:
-                nd["lens"] = [v[t] for t in idx["up" if nd["act"] > 0 else "down"][nd["layer"], nd["n"], :5]]
-        g["tokens"], g["target"] = toks, self.tok.decode([g["token"]])
-        return g
+        return annotate_attribution_graph(
+            g,
+            input_ids=ids,
+            decode=self.tok.decode,
+            catalog=self.catalog,
+        )
 
     def con_index(self):
         """Precomputed connections (build_connections.py), loaded once."""
         if self._con_idx is None:
-            path = os.path.join(CACHE, "connections.npz")
+            path = self.cache_dir / "connections.npz"
             if os.path.exists(path):
                 z = np.load(path)
                 self._con_idx = {key: z[key] for key in z.files}
@@ -333,7 +364,7 @@ class Runtime:
     # ---------- logit lens ----------
     def lens_index(self):
         if self._lens_idx is None:
-            path = os.path.join(CACHE, "lens_index.npz")
+            path = self.cache_dir / "lens_index.npz"
             if os.path.exists(path):
                 z = np.load(path)
                 self._lens_idx = {"up": z["up"], "down": z["down"]}
@@ -341,7 +372,7 @@ class Runtime:
 
     def steer_index(self):
         if getattr(self, "_steer_idx", None) is None:
-            path = os.path.join(CACHE, "steer_index.npz")
+            path = self.cache_dir / "steer_index.npz"
             self._steer_idx = dict(np.load(path)) if os.path.exists(path) else False
         return self._steer_idx or None
 
@@ -477,7 +508,7 @@ class Runtime:
 
     def vocab_strings(self):
         if getattr(self, "_vocab", None) is None:
-            path = os.path.join(CACHE, "vocab.json")
+            path = self.cache_dir / "vocab.json"
             if os.path.exists(path):
                 self._vocab = json.load(open(path))
             else:

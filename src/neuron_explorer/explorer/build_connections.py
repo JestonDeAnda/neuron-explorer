@@ -5,9 +5,9 @@ pre-MLP norm weight of layer j. Neuron A's downstream links in layer j are colum
 B's upstream links in layer i are row B of P, |P| z-scored over A. Each neuron keeps its k strongest links per side
 across all layers, with sign(P).
 
-    uv run python explorer/build_connections.py            # CUDA, about 5 min on a 4090
+    uv run python -m neuron_explorer.explorer.build_connections  # CUDA, about 5 min on a 4090
 
-Writes explorer/cache/connections.npz: {down,up}_layer [L, N, k] int8, {down,up}_n int16, {down,up}_z float16,
+Writes cache/connections.npz: {down,up}_layer [L, N, k] int8, {down,up}_n int16, {down,up}_z float16,
 {down,up}_sign int8.
 """
 import argparse
@@ -20,10 +20,12 @@ import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 
+from neuron_explorer.paths import ProjectPaths
+
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
 ap.add_argument("--k", type=int, default=24)
-ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "connections.npz"))
+ap.add_argument("--out", default=ProjectPaths.discover().cache / "connections.npz")
 a = ap.parse_args()
 dev = "cuda" if torch.cuda.is_available() else "mps"
 
@@ -86,5 +88,6 @@ for side, (bz, bl, bn, bs) in best.items():
     out[f"{side}_layer"] = bl.cpu().numpy().astype(np.int8)
     out[f"{side}_n"] = bn.cpu().numpy()
     out[f"{side}_sign"] = bs.cpu().numpy()
+os.makedirs(os.path.dirname(a.out), exist_ok=True)
 np.savez_compressed(a.out, **out, k=K)
 print("->", a.out, f"{os.path.getsize(a.out) / 1e6:.0f} MB")

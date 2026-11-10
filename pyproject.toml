@@ -32,4 +32,4 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-"neuron_explorer.explorer" = ["static/*", "*.md"]
+"neuron_explorer.explorer" = ["static/*", "prompts/*.md"]

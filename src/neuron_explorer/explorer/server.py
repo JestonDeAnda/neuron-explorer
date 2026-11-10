@@ -1,6 +1,6 @@
 """Neuron explorer server: sweep data, names, embeddings, and the live model.
 
-    uv run python explorer/server.py            # http://localhost:8791
+    uv run python -m neuron_explorer.explorer.server  # http://localhost:8791
 """
 import asyncio
 import builtins
@@ -9,6 +9,8 @@ import json
 import os
 import sys
 import threading
+from contextlib import ExitStack
+from importlib.resources import as_file, files
 
 import numpy as np
 import uvicorn
@@ -17,20 +19,59 @@ from fastapi.responses import PlainTextResponse, FileResponse, JSONResponse, Res
 from fastapi.staticfiles import StaticFiles
 from transformers import AutoConfig
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "sweep"))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rank import compute_units  # noqa: E402
-from runtime import NO_MODEL, Runtime  # noqa: E402
+from neuron_explorer.explorer.runtime import MODEL, NO_MODEL, Runtime
+from neuron_explorer.paths import ProjectPaths
+from sweep.rank import compute_units
 
-RUNS, STATS = os.path.join(ROOT, "runs"), os.path.join(ROOT, "stats")
-NAMES = os.path.join(ROOT, "explorer", "names.json")
 PORT = int(os.environ.get("PORT", 8791))
-_cfg = AutoConfig.from_pretrained("Qwen/Qwen3.5-4B").get_text_config()
-ARCH = {"n_layers": _cfg.num_hidden_layers, "hidden": _cfg.hidden_size, "inter": _cfg.intermediate_size,
-        "layer_types": list(_cfg.layer_types), "attn_heads": _cfg.num_attention_heads,
-        "kv_heads": _cfg.num_key_value_heads, "linear_k_heads": _cfg.linear_num_key_heads,
-        "linear_v_heads": _cfg.linear_num_value_heads}
+
+
+def _model_arch():
+    try:
+        cfg = AutoConfig.from_pretrained(
+            MODEL, local_files_only=NO_MODEL
+        ).get_text_config()
+    except (OSError, ValueError):
+        return {
+            "n_layers": 32,
+            "hidden": 2560,
+            "inter": 9216,
+            "layer_types": [
+                "full_attention" if (layer + 1) % 4 == 0 else "linear_attention"
+                for layer in range(32)
+            ],
+            "attn_heads": 16,
+            "kv_heads": 2,
+            "linear_k_heads": 16,
+            "linear_v_heads": 32,
+        }
+    return {
+        "n_layers": cfg.num_hidden_layers,
+        "hidden": cfg.hidden_size,
+        "inter": cfg.intermediate_size,
+        "layer_types": list(cfg.layer_types),
+        "attn_heads": cfg.num_attention_heads,
+        "kv_heads": cfg.num_key_value_heads,
+        "linear_k_heads": cfg.linear_num_key_heads,
+        "linear_v_heads": cfg.linear_num_value_heads,
+    }
+
+
+ARCH = _model_arch()
+PATHS = ProjectPaths.discover()
+RUNS = PATHS.runs
+STATS = PATHS.stats
+CACHE = PATHS.cache
+NAMES = CACHE / "names.json"
+LENS_INDEX = CACHE / "lens_index.npz"
+ACT_SCALE = CACHE / "act_scale.npz"
+AGENT_DIR = CACHE / "agent"
+UPLOADS = AGENT_DIR / "uploads"
+AGENT_LOCAL = CACHE / "agent_prompt.local.md"
+ROOT = PATHS.root
+PACKAGE_RESOURCES = files("neuron_explorer.explorer")
+AGENT_PROMPT = PACKAGE_RESOURCES.joinpath("prompts", "agent_prompt.md")
+AGENT_METHOD = PACKAGE_RESOURCES.joinpath("prompts", "agent_methodology.md")
 
 app = FastAPI()
 
@@ -58,7 +99,7 @@ async def no_store(request, call_next):
         resp.headers["Cache-Control"] = "no-store"
     return resp
 
-rt = Runtime(STATS)
+rt = Runtime(PATHS)
 _cache = {}
 
 
@@ -190,8 +231,10 @@ async def set_name(req: Request):
         nm[key] = body["name"].strip()
     else:
         nm.pop(key, None)
+    NAMES.parent.mkdir(parents=True, exist_ok=True)
     with open(NAMES, "w") as f:
         json.dump(nm, f, indent=1, sort_keys=True)
+    rt.refresh_catalog()
     return {"ok": True}
 
 
@@ -279,7 +322,6 @@ async def steer(req: Request):
     return StreamingResponse(events(), media_type="text/event-stream")
 
 
-LENS_INDEX = os.path.join(ROOT, "explorer", "cache", "lens_index.npz")
 _lens = {}
 
 
@@ -327,7 +369,6 @@ async def search(q: str, limit: int = 300):
     return {"ready": True, "results": res, "tokens": int(len(match)), "total": len(out)}
 
 
-ACT_SCALE = os.path.join(ROOT, "explorer", "cache", "act_scale.npz")
 MAX_INFER_TOKENS = 1024  # [32, T, 9216] float32 activations plus scores: about 2.4 GB at this length
 
 
@@ -476,10 +517,6 @@ async def attribution(req: Request):
         return {"error": "the live model is off (EXPLORER_NO_MODEL=1)"}
     g = await asyncio.to_thread(rt.attribution, b["text"], b.get("chat", False), b.get("token") or None,
                                 builtins.min(int(b.get("k", 512)), 4096))
-    nm = names()
-    for nd in g["nodes"]:
-        if nd["kind"] == "neuron":
-            nd["name"] = nm.get(f"L{nd['layer']}/N{nd['n']}", "")
     return g
 
 
@@ -487,7 +524,7 @@ async def attribution(req: Request):
 def layout(kind: str = "writes"):
     """Seriated grid layout: cell index (row * side + col) for every neuron, base64 int16, layer-major."""
     import base64
-    path = os.path.join(ROOT, "explorer", "cache", f"layout_{kind}.npz")
+    path = CACHE / f"layout_{kind}.npz"
     if not os.path.exists(path):
         return {"available": False}
     cell = np.load(path)["cell"].astype(np.int16)
@@ -596,8 +633,6 @@ def web_summary(layer: int, n: int, first: int = 5, k: int = 2, top: int = 30, s
 # ---------- Claude: autointerp and chat ----------
 # Each chat is a `claude -p` session resumed turn by turn. Its tools come from agent_mcp.py, which reads through the
 # endpoints below and sends map actions back through /api/agent/ui into the chat's event stream.
-AGENT_PROMPT = os.path.join(ROOT, "explorer", "agent_prompt.md")
-AGENT_DIR = os.path.join(ROOT, "explorer", "cache", "agent")  # claude's cwd, so no project settings or CLAUDE.md apply
 _chats = {}
 _act = {}
 
@@ -841,13 +876,12 @@ async def agent_ui(req: Request):
     return {"ok": True, "note": "shown in the explorer"}
 
 
-UPLOADS = os.path.join(AGENT_DIR, "uploads")
 FILE_TOOLS = ["Read", "Glob", "Grep", "Write", "Edit", "Bash"]
 
 
 @app.post("/api/agent/upload")
 async def agent_upload(req: Request):
-    """A file for the chat, sent as base64 JSON {name, type, data}; kept under explorer/cache/agent/uploads."""
+    """A base64 JSON file for chat, kept under the shared cache agent directory."""
     import base64
     import uuid
     b = await req.json()
@@ -885,19 +919,15 @@ def attachment_block(fid):
     return {"type": "text", "text": f'<file name="{meta["name"]}">\n{text[:cut]}{more}\n</file>'}
 
 
-AGENT_METHOD = os.path.join(ROOT, "explorer", "agent_methodology.md")
-AGENT_LOCAL = os.path.join(ROOT, "explorer", "agent_prompt.local.md")  # this machine's own additions, untracked
-
-
 def agent_prompt_file():
     """agent_prompt.md, then agent_methodology.md and agent_prompt.local.md when present, with {ROOT} filled in as
     this checkout's path, written beside the chat's working files."""
-    text = open(AGENT_PROMPT).read()
-    for extra in (AGENT_METHOD, AGENT_LOCAL):
-        if os.path.exists(extra):
-            text = text.rstrip() + "\n\n" + open(extra).read()
-    text = text.replace("{ROOT}", ROOT)
-    out = os.path.join(AGENT_DIR, "system_prompt.md")
+    text = AGENT_PROMPT.read_text(encoding="utf-8")
+    text = text.rstrip() + "\n\n" + AGENT_METHOD.read_text(encoding="utf-8")
+    if AGENT_LOCAL.is_file():
+        text = text.rstrip() + "\n\n" + AGENT_LOCAL.read_text(encoding="utf-8")
+    text = text.replace("{ROOT}", str(ROOT))
+    out = AGENT_DIR / "system_prompt.md"
     if not os.path.exists(out) or open(out).read() != text:
         with open(out, "w") as f:
             f.write(text)
@@ -986,7 +1016,7 @@ async def agent_chat(req: Request):
     if b.get("layer") is not None:
         msg = f"[The person has L{int(b['layer'])} N{int(b['n'])} open in the explorer.]\n\n{msg}"
     os.makedirs(AGENT_DIR, exist_ok=True)
-    mcp = {"mcpServers": {"explorer": {"command": sys.executable, "args": [os.path.join(ROOT, "explorer", "agent_mcp.py")],
+    mcp = {"mcpServers": {"explorer": {"command": sys.executable, "args": ["-m", "neuron_explorer.explorer.agent_mcp"],
                                        "env": {"EXPLORER_URL": f"http://127.0.0.1:{PORT}", "EXPLORER_CHAT": cid}}}}
     content = [{"type": "text", "text": msg}] + [blk for a in b.get("attachments") or [] if (blk := attachment_block(a))]
     cmd = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
@@ -1068,14 +1098,54 @@ def status():
     return {"status": rt.status}
 
 
-app.mount("/", StaticFiles(directory=os.path.join(ROOT, "explorer", "static"), html=True), name="static")
+_resource_stack = ExitStack()
+_static_directory = _resource_stack.enter_context(
+    as_file(PACKAGE_RESOURCES.joinpath("static"))
+)
+app.state.resource_stack = _resource_stack
+app.mount("/", StaticFiles(directory=_static_directory, html=True), name="static")
+
+
+def create_app(paths: ProjectPaths | None = None) -> FastAPI:
+    """Return the explorer app, optionally configured for an explicit project."""
+    global PATHS, RUNS, STATS, CACHE, NAMES, LENS_INDEX, ACT_SCALE
+    global AGENT_DIR, UPLOADS, AGENT_LOCAL, ROOT, rt
+    if paths is None or paths == PATHS:
+        return app
+
+    PATHS = paths
+    RUNS = paths.runs
+    STATS = paths.stats
+    CACHE = paths.cache
+    NAMES = CACHE / "names.json"
+    LENS_INDEX = CACHE / "lens_index.npz"
+    ACT_SCALE = CACHE / "act_scale.npz"
+    AGENT_DIR = CACHE / "agent"
+    UPLOADS = AGENT_DIR / "uploads"
+    AGENT_LOCAL = CACHE / "agent_prompt.local.md"
+    ROOT = paths.root
+    rt = Runtime(paths)
+    _cache.clear()
+    _ranked.clear()
+    _lens.clear()
+    _act.clear()
+    _infer.clear()
+    _idf.clear()
+    return app
+
+
+@app.on_event("shutdown")
+def close_package_resources():
+    _resource_stack.close()
 
 @app.on_event("startup")
 def preload():
     def go():
         if NO_MODEL:
             rt.status = "no model"
-            rt.vocab_strings()
+            if (CACHE / "vocab.json").is_file():
+                rt.vocab_strings()
+                rt.refresh_catalog()
             return
         rt.ensure_loaded()
         if not os.path.exists(LENS_INDEX):
@@ -1084,6 +1154,7 @@ def preload():
         rt.vocab_strings()
         if not os.path.exists(ACT_SCALE):
             rt.build_act_scale(ACT_SCALE)
+        rt.refresh_catalog()
     threading.Thread(target=go, daemon=True).start()
 
 

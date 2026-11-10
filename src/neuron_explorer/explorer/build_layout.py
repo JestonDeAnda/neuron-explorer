@@ -3,9 +3,9 @@ together. Embeds each neuron by its down_proj column ("writes": the direction it
 gate and up rows ("reads"), cosine-normalised, PCA to 50 dims, UMAP to 2D, then snaps to the grid: sort by y into
 rows of 96, then by x within each row.
 
-    uv run python explorer/build_layout.py --kind writes
+    uv run python -m neuron_explorer.explorer.build_layout --kind writes
 
-Writes explorer/cache/layout_<kind>.npz: cell[L, N] (int16, row * 96 + col for neuron n of layer L).
+Writes cache/layout_<kind>.npz: cell[L, N] (int16, row * 96 + col for neuron n of layer L).
 """
 import argparse
 import json
@@ -15,6 +15,8 @@ import numpy as np
 import umap
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
+
+from neuron_explorer.paths import ProjectPaths
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
@@ -55,6 +57,7 @@ for l in range(L):
         cells[l, band] = r * side + np.arange(side)
     print(f"L{l} done", flush=True)
 
-out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", f"layout_{a.kind}.npz")
+out = ProjectPaths.discover().cache / f"layout_{a.kind}.npz"
+out.parent.mkdir(parents=True, exist_ok=True)
 np.savez(out, cell=cells)
 print("->", out)
