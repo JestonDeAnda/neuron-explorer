@@ -1,5 +1,6 @@
 .venv/
 .worktrees/
+*.egg-info/
 __pycache__/
 .DS_Store
 
@@ -7,6 +8,8 @@ __pycache__/
 runs/
 stats/
 captures/
+cache/
+output/
 logs/
 explorer/cache/connections.sqlite
 
