@@ -145,7 +145,8 @@ def svg(g, max_edges=300, labels=40):
         fill = "#9ae6b4" if (n.get("act") or 0) > 0 else "#fbb6ce"
         if n.get("gate") is not None and n["gate"] < -1.278:
             fill = "#e2e8f0"
-        ring = ('stroke="#dd6b20" stroke-width="2.6"' if n.get("clamped") else 'stroke="#2d3748" stroke-width="0.8"')
+        ring = ('stroke="#dd6b20" stroke-width="2.6"' if n.get("clamped") else
+                'stroke="#6b46c1" stroke-width="2.4"' if n.get("shared") else 'stroke="#2d3748" stroke-width="0.8"')
         out.append(f'<circle class="n" cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" fill="{fill}" {ring}>'
                    f'<title>{tip}</title></circle>')
         if i in named:
@@ -172,9 +173,13 @@ def svg(g, max_edges=300, labels=40):
              ("#e2e8f0", "circle", "gate < −1.278 (gate path sign unreliable)"), ("#a0aec0", "rect", "token embedding")]
     if any(n.get("clamped") for n in nodes):
         items.append(("#fff", "ring", "clamped by the intervention (no inputs)"))
+    if any(n.get("shared") for n in nodes):
+        items.append(("#fff", "shared", n_shared_label(g)))
     lx = PAD_L
     for col, shape, label in items:
-        if shape == "ring":
+        if shape == "shared":
+            out.append(f'<circle cx="{lx + 5}" cy="{ly}" r="5" fill="{col}" stroke="#6b46c1" stroke-width="2.4"/>')
+        elif shape == "ring":
             out.append(f'<circle cx="{lx + 5}" cy="{ly}" r="5" fill="{col}" stroke="#dd6b20" stroke-width="2.6"/>')
         elif shape == "circle":
             out.append(f'<circle cx="{lx + 5}" cy="{ly}" r="5" fill="{col}" stroke="#2d3748" stroke-width="0.8"/>')
@@ -188,6 +193,10 @@ def svg(g, max_edges=300, labels=40):
         lx += 90
     out.append("</g></svg>")
     return "\n".join(out)
+
+
+def n_shared_label(g):
+    return g.get("shared_label", "shared with the other graphs")
 
 
 def overlap(a, b):

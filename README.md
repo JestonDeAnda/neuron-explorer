@@ -62,6 +62,7 @@ and {free} × {+3}, plus one unsteered baseline per prompt.
 | `sweep/plot_attribution.py` | `runs/attribution/<prompt>.svg` and `.json`: attribution graph, circuit-tracer layout |
 | `sweep/check_attribution.py` | exactness checks of the attribution linearization |
 | `sweep/swap_state.py`, `sweep/swap_followup.py` | Texas → California swap at the city token (Dallas → Sacramento) and its controls |
+| `sweep/arith_forms.py` | `runs/attribution/arith_forms.html`: one calculation in digits, English and Chinese, shared neurons and causal tests |
 | `sweep/plot_interventions.py` | `runs/attribution/interventions/`: attribution graph of the intervened model for every swap experiment |
 
 `research_log.md` holds the findings and reasoning; `NOTES.md` the source notes.
