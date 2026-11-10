@@ -90,3 +90,63 @@ IDE lint diagnostics for src/, scripts/, and tests/
 - Wheel construction reports setuptools package-data discovery warnings for
   resource directories, but the wheel inspection confirms all required
   resources are present and root datasets are absent.
+
+## Remaining-review follow-up
+
+Implementation commit:
+`e23fcf51df59d38567e3cf38f50e9afbab1ce480`.
+
+Changes:
+
+- Corrected device detection in `build_connections` to
+  `torch.cuda.is_available()`.
+- Added a model/network-free builder-entry regression that monkeypatches Torch
+  and stops at a sentinel before snapshot download; both CUDA-available and
+  MPS-fallback branches reach the sentinel.
+- Removed the package-module `__main__` uvicorn workflow from
+  `explorer/server.py`; `app` and `create_app` remain importable.
+- Updated builder/server package docstrings to point to retained scripts and
+  added a package-wide obsolete-command-reference audit.
+- Added an AST regression that rejects package-owned `__main__` workflows.
+- Removed all trailing spaces from
+  `docs/slides/attribution_slides.html`, including the six reported blank
+  lines.
+
+RED evidence:
+
+```text
+EXPLORER_NO_MODEL=1 uv run pytest \
+  tests/explorer/test_build_connections.py tests/test_import_safety.py -v
+=> 4 failed, 1 passed
+=> failures proved the cudoptions typo, server __main__ workflow, and obsolete
+   package command examples.
+```
+
+GREEN evidence:
+
+```text
+EXPLORER_NO_MODEL=1 uv run pytest \
+  tests/explorer/test_build_connections.py tests/test_import_safety.py -v
+=> 5 passed
+
+EXPLORER_NO_MODEL=1 uv run pytest -v
+=> 96 passed, 1 upstream Starlette/httpx deprecation warning
+
+EXPLORER_NO_MODEL=1 uv run python scripts/check_attribution.py --tiny
+=> exit 0; every check PASS; ALL PASS
+
+EXPLORER_NO_MODEL=1 uv run pytest \
+  tests/scripts/test_cli_help.py tests/test_import_safety.py -v
+=> 27 passed (all retained script helps and all package import/boundary smokes)
+
+git diff --check 91f1556..HEAD
+rg audit for "python -m neuron_explorer" under src/neuron_explorer
+=> PASS
+
+IDE lint diagnostics for changed source and tests
+=> no errors
+```
+
+No production model, CUDA, or network operation was used by the new device
+selection regression. Existing optional-accelerator and upstream Starlette
+warnings remain unchanged.
