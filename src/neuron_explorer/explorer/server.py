@@ -621,7 +621,7 @@ def infer_paths(pos: int, top: int = 300, min: float = 1.0):
 
 @app.post("/api/attribution")
 async def attribution(req: Request):
-    """Neuron-level attribution graph for the next token after a text (explorer/attribution.py). Body {text, chat?,
+    """Neuron-level attribution graph for the next token after a text (neuron_explorer.attribution). Body {text, chat?,
     token?, k?}; nodes are neurons (layer, pos, n), token embeddings (layer -1) and the target logit."""
     b = await req.json()
     if NO_MODEL:

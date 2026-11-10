@@ -95,7 +95,7 @@ GPU check: during decode the 4090 sits at 100% util, 359 W of 450, full clocks �
 **Decision (2026-10-18): full sweeps use `main_rel`** (Lyra: "your call — whatever is clean and efficient"). Equal push
 sizes relative to the residual norm make units comparable in the ranking and give quiet neurons a push inside the
 coherent window. Queued: L22 full (9,216 neurons + 256 random directions), then L8. First question for the L22 result:
-where does N2742 rank among all neurons with no hint, relative to the random-direction null (`sweep/rank.py --find 2742`).
+where does N2742 rank among all neurons with no hint, relative to the random-direction null (`scripts/rank.py --find 2742`).
 
 ## 2026-10-18 evening — explorer + first input-side evidence
 
@@ -187,7 +187,7 @@ The layout puts neurons with similar down_proj columns next to each other: UMAP 
 
 ## 2026-10-19 02:10 — depth survey: all 32 layers, 384 neurons + 64 controls each
 
-**Why:** L8 and L22 differed in kind: L8 neurons steer topics, L22 neurons steer concepts with lexical families. Two layers can't show whether that's a gradient, two regimes, or noise. A full sweep of every layer costs about 30× an L22; a random 384-neuron subset per layer gives the shape at about 1/24 of the price. Run on 4 Secure 4090 pods, about 11–20 min per layer, about 1h50 wall time, about $6. L8 and L22 come from their full runs, subsampled to the same pool size (384 + 64) because cluster mass depends on pool size. `sweep/depth_report.py` writes `runs/depth_report.json`; `runs/depth_regimes.json` holds the regime metrics.
+**Why:** L8 and L22 differed in kind: L8 neurons steer topics, L22 neurons steer concepts with lexical families. Two layers can't show whether that's a gradient, two regimes, or noise. A full sweep of every layer costs about 30× an L22; a random 384-neuron subset per layer gives the shape at about 1/24 of the price. Run on 4 Secure 4090 pods, about 11–20 min per layer, about 1h50 wall time, about $6. L8 and L22 come from their full runs, subsampled to the same pool size (384 + 64) because cluster mass depends on pool size. `scripts/depth_report.py` writes `runs/depth_report.json`; `runs/depth_regimes.json` holds the regime metrics.
 
 **Dose window first.** Relative doses don't transfer to the first layers. At +0.8, 92% of L0 rollouts are empty (`<think>` loops or nothing), for random directions as well; L1 is 23% / 18% empty. L2 is 16% empty for neurons vs 1% for controls. From L3 onward, empty and length-capped rates match between neurons and controls. So L0–L2 numbers aren't measurements; those layers need their own calibration. The residual norm leaving L0 is small, so 0.8× of it is not "gentle" there. This matches the steer lens, whose median KL at L0 was 10.
 
@@ -252,7 +252,7 @@ The prediction held across layers and within them, but only moderately: ρ ≈ 0
 
 Lyra's window of interest is L4–L27; the edges mostly give "the literal string -ist", so L0–L2 calibration is dropped.
 
-**Hypothesis:** the L13–L19 dip comes from `rank.py` excluding every word in the unsteered baselines. Those baselines are long and contain the discourse words that mid-layer neurons move, so the score would be blind to them. The test is `sweep/shift.py`. It counts every word and measures z against the random controls only, with leave-one-out for the controls. The score sums the 5 largest rises plus the 5 largest falls. What would change my mind: if the dip were a blind spot, the all-words score should flatten it.
+**Hypothesis:** the L13–L19 dip comes from `rank.py` excluding every word in the unsteered baselines. Those baselines are long and contain the discourse words that mid-layer neurons move, so the score would be blind to them. The test is `src/neuron_explorer/sweep/shift.py`. It counts every word and measures z against the random controls only, with leave-one-out for the controls. The score sums the 5 largest rises plus the 5 largest falls. What would change my mind: if the dip were a blind spot, the all-words score should flatten it.
 
 **Result:** it didn't flatten. Share of neurons above the control p95, by score:
 
@@ -277,6 +277,6 @@ Per-layer Spearman ρ between the two scores is 0.84–0.95. The hypothesis is d
 
 **Connections precomputed.** One weight product per layer pair, P[B, A] = (W_gate_j[B]·v_A)(W_up_j[B]·v_A), serves both directions: a column for A's downstream links, a row for B's upstream links. That's 496 pairs, about 430 TFLOP, about 20 s on a 4090, stored as top-24 per side in a 54 MB file. Against the live runtime on 741 neurons it had cached: 99.8% top-24 overlap, median |Δz| 0.005, every sign equal. The first click on a neuron fell from about 5 s to about 25 ms. Most of the old 5 s was loading every connected layer's full rollouts to label connections with words, not the connection maths itself.
 
-**Captures lost and rebuilt.** The sweep's fork captures (MLP input at layers L, L+1, L+4, L+8 at the last prompt token) were never pulled from the pods before deletion. A capture depends only on (direction, dose, prompt), because the push applies at every prompt position, so it can be rebuilt by prefill. `sweep/capture_prefill.py` does that, about 800 rollouts/s on a 4090. Against the fork's own surviving end-to-end captures (294 rollouts, 4 layers) the median relative error is 1.1–1.5% and the max 2%. That is the same bf16 band as the original HF-vs-fork equivalence check. All 32 runs are rebuilt (6.2 GB, `captures/<run>.mlp_in.npy`, rows aligned to jsonl lines). Lesson for the pipeline: pulling a sweep means runs, stats *and* captures, checked by listing every output directory the run's meta names.
+**Captures lost and rebuilt.** The sweep's fork captures (MLP input at layers L, L+1, L+4, L+8 at the last prompt token) were never pulled from the pods before deletion. A capture depends only on (direction, dose, prompt), because the push applies at every prompt position, so it can be rebuilt by prefill. `scripts/capture_prefill.py` does that, about 800 rollouts/s on a 4090. Against the fork's own surviving end-to-end captures (294 rollouts, 4 layers) the median relative error is 1.1–1.5% and the max 2%. That is the same bf16 band as the original HF-vs-fork equivalence check. All 32 runs are rebuilt (6.2 GB, `captures/<run>.mlp_in.npy`, rows aligned to jsonl lines). Lesson for the pipeline: pulling a sweep means runs, stats *and* captures, checked by listing every output directory the run's meta names.
 
 **Embeddings** UMAPs now exist for all 30 subset layers. Each took about 50 s of CPU-bound UMAP on the pod.

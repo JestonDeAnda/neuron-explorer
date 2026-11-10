@@ -1,6 +1,6 @@
 # 神经元级 attribution graph：推导、验证与集成方案（Qwen3.5-4B）
 
-2026-10-26。对应代码：`explorer/attribution.py`（线性化与边计算），`sweep/check_attribution.py`（正确性检查）。
+2026-10-26。对应代码：`src/neuron_explorer/attribution/graph.py`（线性化与边计算），`scripts/check_attribution.py`（正确性检查）。
 
 ## 结论
 
@@ -77,7 +77,7 @@ logit 目标：$A_{s\to(t,v)} = a_s\,(W_U[v]-\bar W_U)^\top N_{\text{final}}\,J_
 
 ## 4. 正确性检查
 
-`sweep/check_attribution.py` 在一个随机初始化的 4 层 Qwen3.5（3 层 DeltaNet + 1 层全注意力，norm 权重非零）和真实 Qwen3.5-4B（float32，MPS，8 个 token 的 prompt）上运行，两者全部通过：
+`scripts/check_attribution.py` 在一个随机初始化的 4 层 Qwen3.5（3 层 DeltaNet + 1 层全注意力，norm 权重非零）和真实 Qwen3.5-4B（float32，MPS，8 个 token 的 prompt）上运行，两者全部通过：
 
 | 检查 | 含义 | tiny | 4B |
 |---|---|---|---|
@@ -105,7 +105,7 @@ completeness 检查对漏冻结的非线性很敏感：只要有一个非线性�
 
 近距离的边，比值落在预期的 1–2 之间；跨 9 层的边（L22→L31）被中间层的连锁反应和冻结掉的注意力变化压过去，符号都反了。这与原文的说法一致：图里的边是假设，需要干预实验来验证；直接边在冻结模型里几乎必然成立，真正要检验的是“连锁效应”（knock-on effects）。
 
-**(b) 冻结 sigmoid 在 $g<-1.278$ 时 gate 路径符号错误。** $\mathrm{silu}'(g)=\sigma(g)\,(1+g(1-\sigma(g)))$ 在 $g\approx-1.278$ 处过零，再往负方向就小于 0，但冻结后的系数 $\sigma(g)$ 始终为正。在 4B 这个 prompt 上，$|a|$ 最大的 1% 神经元中有 **15.9%** 处于这个区间，这正是 NOTES.md 里说的 $(-,-)$“双负回声”象限。对这些目标，经 gate 进入的边的符号与“把源加一点点、目标怎么变”相反；经 up 进入的边不受影响。建议：边分 gate / up 两部分存储，并给 $g<-1.278$ 的目标打标记。
+**(b) 冻结 sigmoid 在 $g<-1.278$ 时 gate 路径符号错误。** $\mathrm{silu}'(g)=\sigma(g)\,(1+g(1-\sigma(g)))$ 在 $g\approx-1.278$ 处过零，再往负方向就小于 0，但冻结后的系数 $\sigma(g)$ 始终为正。在 4B 这个 prompt 上，$|a|$ 最大的 1% 神经元中有 **15.9%** 处于这个区间，这正是 [source notes](notes.md) 里说的 $(-,-)$“双负回声”象限。对这些目标，经 gate 进入的边的符号与“把源加一点点、目标怎么变”相反；经 up 进入的边不受影响。建议：边分 gate / up 两部分存储，并给 $g<-1.278$ 的目标打标记。
 
 **(c) 看不见的部分。** 冻结掉的东西都不在图里：注意力的 QK（谁看谁），以及 DeltaNet 中由数据决定的 $k$、$\beta$、衰减率和门（写入强度、遗忘速度）。DeltaNet 层占 3/4，这一块可能比纯注意力模型更大。
 
@@ -126,9 +126,9 @@ completeness 检查对漏冻结的非线性很敏感：只要有一个非线性�
 
 实测（M 系列 Mac，MPS，bf16，Dallas prompt，$T\approx12$，$B$=16）：$K$=256 约 18 秒，$K$=512 约 28 秒（经 `/api/attribution`），$K$=1024 约 60 秒。bf16 与 fp32 建出的图前 12 个节点相同，影响力相差约 2%。
 
-**已实现**（`explorer/attribution.py` 的 `build_graph`，`explorer/runtime.py` 的 `attribution`，`POST /api/attribution`）：map3d 的 run 标签页里点“trace next token”（可在旁边的框里指定目标 token，默认取模型的 top-1），列表显示按影响力排序的神经元，地图上用 `setWeb(..., {flat: true})` 画出神经元→神经元的边（不同位置折叠到同一对神经元上）。剪枝沿用 §6 的第 4 步，另加 `max_edges`（默认 3000）。gate 小于 −1.278 的目标在悬停提示里标出。“Fact: the capital of the state containing Dallas is” → “ Austin”（p 0.78）：512 个候选直接贡献了 72% 的 logit，最强的节点是 L5 N8109（位于 “Dallas”，steer lens 指向 Texas），L22 / L28 / L31 在 “is” 位置推城市名。
+**已实现**（`src/neuron_explorer/attribution/graph.py` 的 `build_graph`，`src/neuron_explorer/explorer/runtime.py` 的 `attribution`，`POST /api/attribution`）：map3d 的 run 标签页里点“trace next token”（可在旁边的框里指定目标 token，默认取模型的 top-1），列表显示按影响力排序的神经元，地图上用 `setWeb(..., {flat: true})` 画出神经元→神经元的边（不同位置折叠到同一对神经元上）。剪枝沿用 §6 的第 4 步，另加 `max_edges`（默认 3000）。gate 小于 −1.278 的目标在悬停提示里标出。“Fact: the capital of the state containing Dallas is” → “ Austin”（p 0.78）：512 个候选直接贡献了 72% 的 logit，最强的节点是 L5 N8109（位于 “Dallas”，steer lens 指向 Texas），L22 / L28 / L31 在 “is” 位置推城市名。
 
-### 6.1 干预验证：把 Texas 换成 California（`sweep/swap_state.py`、`sweep/swap_followup.py`）
+### 6.1 干预验证：把 Texas 换成 California（`scripts/swap_state.py`、`scripts/swap_followup.py`）
 
 只在 “ Dallas” 这一个位置上改 MLP 激活，后面的前向真实重算。
 
@@ -136,7 +136,7 @@ completeness 检查对漏冻结的非线性很敏感：只要有一个非线性�
 - **California 这一侧的主杠杆是同层的 L5 N6203。** 它的负激活对应湾区城市：San Francisco −7.44，Oakland、Berkeley、San Jose 约 −2.3，LA、San Diego、Fresno 只有 −0.5 左右，其他州的城市接近 0。它的 steer lens 没有可读的词，单看 lens 是找不到它的，要靠 San Francisco prompt 的 attribution 图。
 - **两个神经元就能换州。** N8109 置 0、N6203 设为 −14.9（San Francisco 值的 2 倍）后，Austin 0.010，Sacramento 0.53，San 0.29。把 San Francisco 图里 “ Francisco” 位置前 5 个神经元设为 2 倍的 San Francisco 值时，Austin 0.003、Sacramento 0.66。这 5 个里，除 N6203 外的 4 个单独改都几乎没有作用，去掉 N6203 后整组也没有作用（Austin 0.735）。把 L0–L3 的全部神经元从 San Francisco prompt 修补过来，Sacramento 0.72，这是上限。
 - **改动的是“州”这个中间概念，而不是直接写入 “Sacramento”。** 同样的改动下：“Dallas is a city in the state of” 的回答从 Texas 0.99 变为 California 0.975；州长从 Greg（Abbott）变为 Jerry（Brown）0.27 和 Gavin 0.11；最大城市从 Houston 变为 San 0.63（贪心续写 “San Francisco”）。“Dallas Cowboys” 的语境不受影响；问答格式的 prompt 受影响较小（Texas 0.40→0.15，California 0.09，贪心续写仍是 Texas）。把这一改动放到 Chicago、Miami、Seattle、Boston 的城市位置上，Sacramento 都升到 0.53–0.71。
-- 每个干预都画了干预后模型的 attribution 图：`sweep/plot_interventions.py` 输出到 `runs/attribution/interventions/`（69 张图，有 `index.html` 汇总表）。`build_graph(..., clamp={(layer, pos, n): value})` 把被干预的神经元作为没有输入的源节点（图中以橙色圈标出）。置 0 的神经元贡献为 0，所以不会出现在图里。在 fp32 下，线性化前向与真实的干预后前向在概率上一致到小数点后 4 位；bf16 下相差至多约 0.04，是舍入误差，真实 bf16 模型与 fp32 模型之间也差这么多。
+- 每个干预都画了干预后模型的 attribution 图：`scripts/plot_interventions.py` 输出到 `runs/attribution/interventions/`（69 张图，有 `index.html` 汇总表）。`build_graph(..., clamp={(layer, pos, n): value})` 把被干预的神经元作为没有输入的源节点（图中以橙色圈标出）。置 0 的神经元贡献为 0，所以不会出现在图里。在 fp32 下，线性化前向与真实的干预后前向在概率上一致到小数点后 4 位；bf16 下相差至多约 0.04，是舍入误差，真实 bf16 模型与 fp32 模型之间也差这么多。
 - 换上去的更像是 “San Francisco 湾区” 而不是整个 California：候选里 “ San” 一直有 0.2–0.3，最大城市给出的是 San Francisco 而不是 Los Angeles。
 
 ### 6.2 从发现电路到改写答案：成功经验与方法论
@@ -244,7 +244,7 @@ a^{\mathrm{Dallas}}_{\ell,t,n}
 
 方法论上的核心结论是：**先用 attribution 找“在哪里计算”，再用参考状态 patch 确定“写什么值”，最后通过跨问题行为判断“改的是什么概念”。** 单个可解释神经元、单条大边或一次答案翻转，都不足以独立支持机制结论。
 
-### 6.3 同一算式的三种写法：阿拉伯数字、英文、中文（`sweep/arith_forms.py`）
+### 6.3 同一算式的三种写法：阿拉伯数字、英文、中文（`scripts/arith_forms.py`）
 
 主算式 8 − 3 = 5，对照算式 2 × 4 = 8，各用三种写法，共 6 张图（$K$=1024），报告在 `runs/attribution/arith_forms.html`（单文件，内嵌 SVG），数据在 `runs/attribution/arith/`。
 
@@ -281,7 +281,7 @@ a^{\mathrm{Dallas}}_{\ell,t,n}
 | [NousResearch/neural-steering](https://github.com/NousResearch/neural-steering) | MIT | RelP 神经元归因、神经元之间的边、steering | 方法相同，不支持 Qwen3.5，可作参考 |
 | [RollingRo11/relp-circuits](https://github.com/RollingRo11/relp-circuits) | — | ADAG 的复现（Llama / OLMo） | 同上 |
 
-**建议**：线性化必须针对 Qwen3.5 自己写（大部分工作量在这里，现在的 `explorer/attribution.py` 约 200 行，已通过 §4 的检查）。剪枝和影响力计算从 circuit-tracer vendor（保留 MIT 版权头）。前端两条路：一是 circuit-tracer 前端（成熟，有 subgraph / supernode 交互），二是接进我们自己的 3D 地图（与 steering、lens、连接锥体联动）。最后选了第二条。剪枝没有 vendor，而是按同样的公式自己写的（`_influence`，用级数代替求逆）。
+**建议**：线性化必须针对 Qwen3.5 自己写（大部分工作量在这里，现在的 `src/neuron_explorer/attribution/graph.py` 约 200 行，已通过 §4 的检查）。剪枝和影响力计算从 circuit-tracer vendor（保留 MIT 版权头）。前端两条路：一是 circuit-tracer 前端（成熟，有 subgraph / supernode 交互），二是接进我们自己的 3D 地图（与 steering、lens、连接锥体联动）。最后选了第二条。剪枝没有 vendor，而是按同样的公式自己写的（`_influence`，用级数代替求逆）。
 
 ## 8. 下一步
 

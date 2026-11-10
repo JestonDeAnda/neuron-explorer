@@ -1,4 +1,4 @@
-"""Checks explorer/attribution.py: the linearized Qwen3.5 reproduces the forward pass, its edges sum to each target
+"""Checks neuron_explorer.attribution: the linearized Qwen3.5 reproduces the forward pass, its edges sum to each target
 (completeness), and each edge equals the change a source's removal causes in the frozen model (linearity).
 
     uv run python scripts/check_attribution.py --tiny            # random 4-layer Qwen3.5, CPU, seconds

@@ -307,7 +307,7 @@ async function inferView(g = qGen) {
   fireResults = { ...r, fires: true, ready: true };
   renderResults(fireResults, $("#run-rows"));
 }
-// ---------- attribution graph: which neurons, at which tokens, carry the next token (explorer/attribution.py) ----------
+// ---------- attribution graph: which neurons, at which tokens, carry the next token (neuron_explorer.attribution) ----------
 state.attr = null;
 let attrGen = 0;
 $("#attr-go").onclick = async () => {
