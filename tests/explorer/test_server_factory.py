@@ -1,10 +1,17 @@
 import json
+import sqlite3
+from dataclasses import replace
 
+import pytest
 from fastapi.testclient import TestClient
 
-from neuron_explorer.explorer.server import create_app
+from neuron_explorer.explorer.ranking import compute_units
+from neuron_explorer.explorer.server import (
+    _active_state,
+    agent_prompt_file,
+    create_app,
+)
 from neuron_explorer.paths import ProjectPaths
-from neuron_explorer.sweep.rank import compute_units
 
 
 def _paths(root):
@@ -21,7 +28,7 @@ def _write_run(paths, name, layer):
     )
 
 
-def test_rank_is_importable_from_installed_package_namespace():
+def test_ranking_is_importable_from_explorer_package():
     assert callable(compute_units)
 
 
@@ -68,3 +75,38 @@ def test_layout_rejects_path_traversal(tmp_path):
         response = client.get("/api/layout", params={"kind": "../names"})
 
     assert response.status_code == 422
+
+
+def test_agent_prompt_uses_active_apps_cache_override(tmp_path):
+    paths = replace(
+        _paths(tmp_path / "project"),
+        cache=tmp_path / "machine-cache",
+    )
+    app = create_app(paths)
+    (paths.cache / "agent").mkdir(parents=True)
+    token = _active_state.set(app.state.explorer)
+    try:
+        prompt_path = agent_prompt_file()
+    finally:
+        _active_state.reset(token)
+
+    prompt = prompt_path.read_text(encoding="utf-8")
+    assert f"{paths.cache}/agent/work/" in prompt
+    assert "{CACHE}" not in prompt
+    app.state.runtime.close()
+
+
+def test_app_shutdown_closes_only_its_runtime(tmp_path):
+    first = create_app(_paths(tmp_path / "first"))
+    second = create_app(_paths(tmp_path / "second"))
+
+    with TestClient(first, base_url="http://localhost:8791") as client:
+        assert client.get("/api/status").status_code == 200
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        first.state.runtime._db.execute("SELECT 1")
+    assert second.state.runtime._db.execute("SELECT 1").fetchone() == (1,)
+
+    first.state.runtime.close()
+    second.state.runtime.close()
+    second.state.runtime.close()

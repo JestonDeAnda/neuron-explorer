@@ -62,6 +62,7 @@ class Runtime:
         )
         self._db.execute("CREATE TABLE IF NOT EXISTS con (key TEXT PRIMARY KEY, val TEXT)")
         self._db_lock = threading.Lock()
+        self._closed = False
         self._lens_idx = None
         self._con_idx = None
         self.lock = threading.Lock()
@@ -78,6 +79,14 @@ class Runtime:
         self._capture_full = None
         self._lens_cache = {}
         self.refresh_catalog()
+
+    def close(self) -> None:
+        """Close runtime-owned resources; repeated calls are safe."""
+        with self._db_lock:
+            if self._closed:
+                return
+            self._db.close()
+            self._closed = True
 
     def refresh_catalog(self) -> None:
         """Reload annotation metadata after a cache-backed name change."""

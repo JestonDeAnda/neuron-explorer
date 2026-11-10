@@ -13,7 +13,7 @@ import random
 
 import numpy as np
 
-from neuron_explorer.sweep.rank import compute_units
+from rank import compute_units
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--layers", default="0-31")

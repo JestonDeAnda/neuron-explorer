@@ -25,5 +25,6 @@ def test_agent_prompt_uses_shared_cache_work_directory():
         .read_text(encoding="utf-8")
     )
 
-    assert "{ROOT}/cache/agent/work/" in prompt
+    assert "{CACHE}/agent/work/" in prompt
+    assert "{ROOT}/cache/agent/work/" not in prompt
     assert "{ROOT}/explorer/cache/agent/work/" not in prompt

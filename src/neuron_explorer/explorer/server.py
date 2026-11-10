@@ -23,9 +23,9 @@ from fastapi.responses import PlainTextResponse, FileResponse, JSONResponse, Res
 from fastapi.staticfiles import StaticFiles
 from transformers import AutoConfig
 
+from neuron_explorer.explorer.ranking import compute_units
 from neuron_explorer.explorer.runtime import MODEL, NO_MODEL, Runtime
 from neuron_explorer.paths import ProjectPaths
-from neuron_explorer.sweep.rank import compute_units
 
 PORT = int(os.environ.get("PORT", 8791))
 
@@ -1031,6 +1031,7 @@ def agent_prompt_file():
     if AGENT_LOCAL.is_file():
         text = text.rstrip() + "\n\n" + AGENT_LOCAL.read_text(encoding="utf-8")
     text = text.replace("{ROOT}", str(ROOT))
+    text = text.replace("{CACHE}", str(CACHE))
     out = AGENT_DIR / "system_prompt.md"
     if not os.path.exists(out) or open(out).read() != text:
         with open(out, "w") as f:
@@ -1250,6 +1251,7 @@ def _create_app(state: ExplorerState) -> FastAPI:
             _active_state.reset(token)
 
     instance.router.add_event_handler("startup", lambda: _start_preload(state))
+    instance.router.add_event_handler("shutdown", state.runtime.close)
     return instance
 
 
