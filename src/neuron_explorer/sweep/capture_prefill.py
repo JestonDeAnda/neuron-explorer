@@ -21,14 +21,14 @@ class Stop(Exception):
     pass
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("runs", nargs="+")
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--seed", type=int, default=0, help="the sweep's --seed (random-control directions)")
     ap.add_argument("--out-dir", default="captures")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     os.makedirs(a.out_dir, exist_ok=True)
 
     tok = AutoTokenizer.from_pretrained(a.model)

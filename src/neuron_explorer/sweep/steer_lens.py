@@ -22,7 +22,7 @@ CHAT = ["Who are you?", "Write whatever you like."]
 PLAIN = ["I think the most important thing to remember is", "Today we are going to talk about"]
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--layers", default="0-31")
@@ -30,7 +30,7 @@ def main():
     ap.add_argument("--neurons-per-batch", type=int, default=96)
     ap.add_argument("--k", type=int, default=12)
     ap.add_argument("--out", default="stats/steer_lens")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     lo, _, hi = a.layers.partition("-")
     layers = list(range(int(lo), int(hi or lo) + 1))
 

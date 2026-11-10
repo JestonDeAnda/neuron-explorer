@@ -6,81 +6,21 @@ the edited layer is recomputed), at one position only.
 """
 import argparse
 import json
-import os
-import sys
 
 import numpy as np
-import torch
-
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CACHE = os.path.join(ROOT, "explorer", "cache")
-
-DALLAS = "Fact: the capital of the state containing Dallas is"
-OTHERS = {"San Francisco": "Fact: the capital of the state containing San Francisco is",
-          "Los Angeles": "Fact: the capital of the state containing Los Angeles is",
-          "Miami": "Fact: the capital of the state containing Miami is",
-          "Chicago": "Fact: the capital of the state containing Chicago is"}
-CAPITALS = [" Austin", " Sacramento", " Tallahassee", " Springfield", " Houston", " Dallas", " Los", " San"]
-
-
-class Model:
-    def __init__(self, dtype=torch.bfloat16):
-        from transformers import AutoTokenizer, Qwen3_5ForConditionalGeneration
-        self.dev = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-        self.tok = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-4B")
-        m = Qwen3_5ForConditionalGeneration.from_pretrained("Qwen/Qwen3.5-4B", dtype=dtype).to(self.dev).eval()
-        self.model, self.lm = m, m.model.language_model
-        self.edits = {}  # layer -> pos -> (neurons, values): activations set at one position
-        self.capture = None
-        for i, layer in enumerate(self.lm.layers):
-            layer.mlp.down_proj.register_forward_pre_hook(self._hook(i))
-
-    def _hook(self, i):
-        def hook(mod, inp):
-            h = inp[0]
-            if self.capture is not None:
-                self.capture[i] = h[0].float().cpu()
-            mine = self.edits.get(i)
-            if not mine:
-                return None
-            h = h.clone()
-            for pos, (ns, vs) in mine.items():
-                h[0, pos, torch.tensor(ns, device=h.device)] = torch.tensor(vs, device=h.device, dtype=h.dtype)
-            return (h,)
-        return hook
-
-    def ids(self, text):
-        return self.tok(text).input_ids
-
-    @torch.inference_mode()
-    def run(self, text, edits=(), capture=False):
-        """Next-token log-probs after text, with edits; optionally every layer's activations [L][T, N]."""
-        self.edits, self.capture = {}, ({} if capture else None)
-        for layer, pos, n, v in edits:
-            ns, vs = self.edits.setdefault(layer, {}).setdefault(pos, ([], []))
-            ns.append(n)
-            vs.append(v)
-        try:
-            out = self.model(input_ids=torch.tensor([self.ids(text)], device=self.dev), use_cache=False)
-            lp = out.logits[0, -1].float().log_softmax(-1).cpu()
-            return lp, self.capture
-        finally:
-            self.edits, self.capture = {}, None
-
-    def top(self, lp, k=8):
-        v, i = lp.topk(k)
-        return [(self.tok.decode([int(t)]), round(float(x.exp()), 3)) for x, t in zip(v, i)]
-
-    def prob(self, lp, word):
-        return float(lp[self.tok(word, add_special_tokens=False).input_ids[0]].exp())
-
-
-def vocab():
-    return json.load(open(os.path.join(CACHE, "vocab.json")))
+from neuron_explorer.paths import ProjectPaths
+from neuron_explorer.sweep.interventions import (
+    DALLAS,
+    OTHERS,
+    Model,
+    attribution_group,
+    load_vocabulary,
+)
 
 
 def explore(M):
-    v, st = vocab(), np.load(os.path.join(CACHE, "steer_index.npz"))
+    paths = ProjectPaths.discover()
+    v, st = load_vocabulary(paths), np.load(paths.cache / "steer_index.npz")
     print("== baselines")
     for name, text in [("Dallas", DALLAS)] + list(OTHERS.items()):
         lp, _ = M.run(text)
@@ -120,16 +60,12 @@ def explore(M):
 
 def group(M, text, pos, max_layer, k):
     """Neurons of text's attribution graph at pos, layers <= max_layer, by influence: [(layer, n, act, influence)]."""
-    sys.path.insert(0, os.path.join(ROOT, "explorer"))
-    from attribution import build_graph
-    g = build_graph(M.lm, M.model.lm_head, M.ids(text), k=k)
-    rows = [(x["layer"], x["n"], x["act"], x["influence"]) for x in g["nodes"]
-            if x["kind"] == "neuron" and x["pos"] == pos and x["layer"] <= max_layer]
-    return sorted(rows, key=lambda r: -r[3])
+    return attribution_group(M, text, pos, max_layer, k)
 
 
 def swap(M, max_layer, k, out):
-    v, st = vocab(), np.load(os.path.join(CACHE, "steer_index.npz"))
+    paths = ProjectPaths.discover()
+    v, st = load_vocabulary(paths), np.load(paths.cache / "steer_index.npz")
     td, ts = M.ids(DALLAS), M.ids(OTHERS["San Francisco"])
     pd, ps = len(td) - 2, len(ts) - 2
     texas = group(M, DALLAS, pd, max_layer, k)
@@ -180,13 +116,14 @@ def swap(M, max_layer, k, out):
         print(out)
 
 
-def main():
+def main(argv=None):
+    paths = ProjectPaths.discover()
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["explore", "swap"])
     ap.add_argument("--max-layer", type=int, default=12, help="deepest layer the state groups are taken from")
     ap.add_argument("--k", type=int, default=512, help="attribution candidates per graph")
-    ap.add_argument("--out", default=os.path.join(ROOT, "runs", "attribution", "swap_state.json"))
-    a = ap.parse_args()
+    ap.add_argument("--out", default=str(paths.runs / "attribution" / "swap_state.json"))
+    a = ap.parse_args(argv)
     M = Model()
     if a.cmd == "explore":
         explore(M)

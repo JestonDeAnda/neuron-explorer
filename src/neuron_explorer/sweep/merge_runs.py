@@ -10,11 +10,11 @@ import json
 import os
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("inputs", nargs="+")
     ap.add_argument("--out", required=True)
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
 
     seen, n_in, n_out = set(), 0, 0
     with open(a.out, "w") as f:

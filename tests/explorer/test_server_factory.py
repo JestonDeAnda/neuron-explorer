@@ -5,13 +5,13 @@ from dataclasses import replace
 import pytest
 from fastapi.testclient import TestClient
 
-from neuron_explorer.explorer.ranking import compute_units
 from neuron_explorer.explorer.server import (
     _active_state,
     agent_prompt_file,
     create_app,
 )
 from neuron_explorer.paths import ProjectPaths
+from neuron_explorer.sweep.rank import compute_units
 
 
 def _paths(root):

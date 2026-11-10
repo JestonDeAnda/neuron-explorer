@@ -23,9 +23,9 @@ from fastapi.responses import PlainTextResponse, FileResponse, JSONResponse, Res
 from fastapi.staticfiles import StaticFiles
 from transformers import AutoConfig
 
-from neuron_explorer.explorer.ranking import compute_units
 from neuron_explorer.explorer.runtime import MODEL, NO_MODEL, Runtime
 from neuron_explorer.paths import ProjectPaths
+from neuron_explorer.sweep.rank import compute_units
 
 PORT = int(os.environ.get("PORT", 8791))
 

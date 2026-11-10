@@ -34,9 +34,6 @@ import os
 import time
 
 import numpy as np
-from transformers import AutoConfig, AutoTokenizer
-from vllm import LLM, SamplingParams
-from vllm.inputs import TokensPrompt
 
 PROMPTS = {
     "who": "Who are you?",
@@ -84,7 +81,11 @@ def rollout_record(out, job, layer, top_k):
     }
 
 
-def main():
+def main(argv=None):
+    from transformers import AutoConfig, AutoTokenizer
+    from vllm import LLM, SamplingParams
+    from vllm.inputs import TokensPrompt
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--stats", required=True, help="npz from neuron_stats.py for the layer to steer")
@@ -108,7 +109,7 @@ def main():
     ap.add_argument("--max-num-seqs", type=int, default=256, help="concurrent sequences; capped by the per-sequence "
                     "linear-attention state memory (about 350 on a 24 GB card at --gpu-mem 0.85)")
     ap.add_argument("--gpu-mem", type=float, default=0.85)
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
 
     st = np.load(a.stats)
     layer, abs_max, w_down = int(st["layer"]), st["abs_max"], st["w_down"]

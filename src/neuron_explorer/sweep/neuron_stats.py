@@ -68,7 +68,7 @@ class RegimeStats:
         self.np_min = torch.minimum(self.np_min, torch.where(~gp & up_, a, pinf).amin(0))
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
     ap.add_argument("--layers", default="22", help="comma-separated decoder layer indices")
@@ -77,7 +77,7 @@ def main():
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="stats/q35-4b")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     layers = [int(x) for x in a.layers.split(",")]
 
     tok = AutoTokenizer.from_pretrained(a.model)
