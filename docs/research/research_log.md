@@ -99,7 +99,7 @@ where does N2742 rank among all neurons with no hint, relative to the random-dir
 
 ## 2026-10-18 evening — explorer + first input-side evidence
 
-Built a local explorer (`explorer/`, http://localhost:8791): isometric map of the real architecture (residual spine,
+Built a local explorer (`src/neuron_explorer/explorer/`, http://localhost:8791): isometric map of the real architecture (residual spine,
 3:1 linear/full-attention slabs, 96×96 neuron sheets per layer), hover = neuron's ± logit lens + direct-path
 connections drawn live, focus panel with Examples (prompt × dose grid), live steered Chat (add or ×, ▲/0/▼ streaming
 from HF on the Mac's MPS), reads-you, Details (word cluster, dose table, lens, connections with each target's own lens),

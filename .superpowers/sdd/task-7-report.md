@@ -52,3 +52,36 @@ edited source/test files.
 The five pre-existing full-suite warnings are unhandled Hugging Face background
 thread `ProxyError: 403 Forbidden` warnings in explorer server-factory tests.
 They did not fail tests and are unrelated to the documentation changes.
+
+## Review fixes
+
+- Corrected the slide deck's memo link to
+  `../research/attribution_memo.md`.
+- Corrected the research log's retained explorer directory reference to
+  `src/neuron_explorer/explorer/` without changing the surrounding account.
+- Added HTML `href`/`src` integrity coverage for files under `docs/`, including
+  explicit handling for anchors, external URLs, protocol-relative URLs,
+  `mailto:`, `javascript:`, and `data:` URLs.
+
+The HTML integrity test was observed failing before the link fix:
+
+```text
+uv run pytest tests/test_documentation.py -v
+1 failed, 3 passed in 0.09s
+broken local HTML links:
+docs/slides/attribution_slides.html -> attribution_memo.md
+```
+
+Final documentation verification:
+
+```text
+uv run pytest tests/test_documentation.py -v
+5 passed in 0.07s
+```
+
+Final full regression verification:
+
+```text
+uv run pytest
+80 passed, 5 warnings in 3.97s
+```
