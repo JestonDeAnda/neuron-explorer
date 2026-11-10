@@ -20,12 +20,7 @@ class ProjectPaths:
 
     @classmethod
     def discover(cls, root: Path | None = None) -> ProjectPaths:
-        """Resolve paths without creating directories.
-
-        Source checkouts are discovered from the package location, independent
-        of the current working directory. Installed packages intentionally use
-        the current working directory as their output-root fallback.
-        """
+        """Resolve paths without creating directories or relying on the CWD."""
         project_root = cls._project_root(root)
         return cls(
             root=project_root,
