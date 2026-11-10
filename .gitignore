@@ -2,6 +2,10 @@
 .worktrees/
 *.egg-info/
 __pycache__/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
 .DS_Store
 
 # sweep data and derived files
