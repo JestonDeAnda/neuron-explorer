@@ -41,3 +41,28 @@ def test_annotation_helper_decodes_and_catalogs_without_runtime():
     assert annotated["nodes"][0]["tok"] == " second"
     assert annotated["nodes"][0]["name"] == "named feature"
     assert annotated["nodes"][0]["lens"] == [" positive"]
+
+
+def test_annotation_helper_keeps_empty_name_for_unknown_neuron():
+    graph = {
+        "token": 19,
+        "nodes": [
+            {
+                "kind": "neuron",
+                "layer": 4,
+                "pos": 0,
+                "n": 8,
+                "act": 1.0,
+            }
+        ],
+        "edges": [],
+    }
+
+    annotated = annotate_attribution_graph(
+        graph,
+        input_ids=[11],
+        decode=lambda token_ids: str(token_ids[0]),
+        catalog=StaticCatalog(),
+    )
+
+    assert annotated["nodes"][0]["name"] == ""

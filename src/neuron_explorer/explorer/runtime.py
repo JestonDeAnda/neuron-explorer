@@ -44,7 +44,11 @@ def annotate_attribution_graph(
     """Decode and catalog a raw attribution graph without constructing a runtime."""
     tokens = [decode([token_id]) for token_id in input_ids]
     target = decode([int(graph["token"])])
-    return annotate_graph(graph, tokens=tokens, target=target, catalog=catalog)
+    annotated = annotate_graph(graph, tokens=tokens, target=target, catalog=catalog)
+    for node in annotated.get("nodes", []):
+        if node.get("kind") == "neuron":
+            node.setdefault("name", "")
+    return annotated
 
 
 class Runtime:

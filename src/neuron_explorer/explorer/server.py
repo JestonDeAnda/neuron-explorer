@@ -3,14 +3,18 @@
     uv run python -m neuron_explorer.explorer.server  # http://localhost:8791
 """
 import asyncio
+import atexit
 import builtins
 import glob
 import json
 import os
 import sys
 import threading
+from contextvars import ContextVar, copy_context
 from contextlib import ExitStack
+from dataclasses import dataclass, field
 from importlib.resources import as_file, files
+from typing import Any, Literal
 
 import numpy as np
 import uvicorn
@@ -21,7 +25,7 @@ from transformers import AutoConfig
 
 from neuron_explorer.explorer.runtime import MODEL, NO_MODEL, Runtime
 from neuron_explorer.paths import ProjectPaths
-from sweep.rank import compute_units
+from neuron_explorer.sweep.rank import compute_units
 
 PORT = int(os.environ.get("PORT", 8791))
 
@@ -58,20 +62,139 @@ def _model_arch():
 
 
 ARCH = _model_arch()
-PATHS = ProjectPaths.discover()
-RUNS = PATHS.runs
-STATS = PATHS.stats
-CACHE = PATHS.cache
-NAMES = CACHE / "names.json"
-LENS_INDEX = CACHE / "lens_index.npz"
-ACT_SCALE = CACHE / "act_scale.npz"
-AGENT_DIR = CACHE / "agent"
-UPLOADS = AGENT_DIR / "uploads"
-AGENT_LOCAL = CACHE / "agent_prompt.local.md"
-ROOT = PATHS.root
 PACKAGE_RESOURCES = files("neuron_explorer.explorer")
 AGENT_PROMPT = PACKAGE_RESOURCES.joinpath("prompts", "agent_prompt.md")
 AGENT_METHOD = PACKAGE_RESOURCES.joinpath("prompts", "agent_methodology.md")
+
+
+@dataclass
+class ExplorerState:
+    paths: ProjectPaths
+    runtime: Runtime = field(init=False)
+    layer_cache: dict[Any, Any] = field(default_factory=dict)
+    ranked: dict[Any, Any] = field(default_factory=dict)
+    lens: dict[Any, Any] = field(default_factory=dict)
+    inferred: dict[Any, Any] = field(default_factory=dict)
+    idf: dict[Any, Any] = field(default_factory=dict)
+    chats: dict[Any, Any] = field(default_factory=dict)
+    activation_ranges: dict[Any, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.runtime = Runtime(self.paths)
+
+    @property
+    def runs(self):
+        return self.paths.runs
+
+    @property
+    def stats(self):
+        return self.paths.stats
+
+    @property
+    def cache(self):
+        return self.paths.cache
+
+    @property
+    def names(self):
+        return self.cache / "names.json"
+
+    @property
+    def lens_index(self):
+        return self.cache / "lens_index.npz"
+
+    @property
+    def act_scale(self):
+        return self.cache / "act_scale.npz"
+
+    @property
+    def agent_dir(self):
+        return self.cache / "agent"
+
+    @property
+    def uploads(self):
+        return self.agent_dir / "uploads"
+
+    @property
+    def agent_local(self):
+        return self.cache / "agent_prompt.local.md"
+
+    @property
+    def root(self):
+        return self.paths.root
+
+
+_active_state: ContextVar[ExplorerState | None] = ContextVar(
+    "explorer_state", default=None
+)
+_fallback_state = ExplorerState(ProjectPaths.discover())
+
+
+def _state() -> ExplorerState:
+    return _active_state.get() or _fallback_state
+
+
+class _StateAttribute:
+    """Resolve a module compatibility global from the active app state."""
+
+    def __init__(self, name):
+        object.__setattr__(self, "_name", name)
+
+    def _value(self):
+        return getattr(_state(), object.__getattribute__(self, "_name"))
+
+    def __getattr__(self, name):
+        return getattr(self._value(), name)
+
+    def __setattr__(self, name, value):
+        setattr(self._value(), name, value)
+
+    def __fspath__(self):
+        return os.fspath(self._value())
+
+    def __str__(self):
+        return str(self._value())
+
+    def __truediv__(self, other):
+        return self._value() / other
+
+    def __getitem__(self, key):
+        return self._value()[key]
+
+    def __setitem__(self, key, value):
+        self._value()[key] = value
+
+    def __contains__(self, item):
+        return item in self._value()
+
+    def __iter__(self):
+        return iter(self._value())
+
+    def __len__(self):
+        return len(self._value())
+
+    def __bool__(self):
+        return bool(self._value())
+
+
+PATHS = _StateAttribute("paths")
+RUNS = _StateAttribute("runs")
+STATS = _StateAttribute("stats")
+CACHE = _StateAttribute("cache")
+NAMES = _StateAttribute("names")
+LENS_INDEX = _StateAttribute("lens_index")
+ACT_SCALE = _StateAttribute("act_scale")
+AGENT_DIR = _StateAttribute("agent_dir")
+UPLOADS = _StateAttribute("uploads")
+AGENT_LOCAL = _StateAttribute("agent_local")
+ROOT = _StateAttribute("root")
+rt = _StateAttribute("runtime")
+_cache = _StateAttribute("layer_cache")
+_ranked = _StateAttribute("ranked")
+_lens = _StateAttribute("lens")
+_infer = _StateAttribute("inferred")
+_idf = _StateAttribute("idf")
+_chats = _StateAttribute("chats")
+_act = _StateAttribute("activation_ranges")
 
 app = FastAPI()
 
@@ -98,10 +221,6 @@ async def no_store(request, call_next):
     if not request.url.path.startswith("/api/"):
         resp.headers["Cache-Control"] = "no-store"
     return resp
-
-rt = Runtime(PATHS)
-_cache = {}
-
 
 def layer_runs():
     """layer -> path of its sweep run: main_rel preferred, then the largest (calibration runs excluded)."""
@@ -153,9 +272,6 @@ def load_layer(layer):
         _cache[layer] = {"key": key, "path": path, "rows": rows, "units": units, "by_unit": by_unit,
                          "meta": json.load(open(path.replace(".jsonl", ".meta.json")))}
         return _cache[layer]
-
-
-_ranked = {}
 
 
 def ranked_words(layer):
@@ -304,7 +420,8 @@ async def steer(req: Request):
         except Exception as e:  # surfaced in the UI next to the chat
             loop.call_soon_threadsafe(q.put_nowait, {"row": None, "error": repr(e)})
 
-    threading.Thread(target=work, daemon=True).start()
+    context = copy_context()
+    threading.Thread(target=context.run, args=(work,), daemon=True).start()
 
     async def events():
         try:
@@ -320,9 +437,6 @@ async def steer(req: Request):
             cancel.set()
 
     return StreamingResponse(events(), media_type="text/event-stream")
-
-
-_lens = {}
 
 
 def lens_index():
@@ -398,9 +512,6 @@ async def fires(text: str, limit: int = 300, chat: bool = False):
         res.append({"layer": l, "n": n, "sign": sign, "score": round(score, 2), "act": round(raw, 2), "token": toks[t],
                     "pos": t, "name": nm.get(f"L{l}/N{n}", ""), "lens": lens})
     return {"ready": True, "results": res, "tokens": toks}
-
-
-_infer = {}
 
 
 async def score_text(text, chat=False):
@@ -521,7 +632,7 @@ async def attribution(req: Request):
 
 
 @app.get("/api/layout")
-def layout(kind: str = "writes"):
+def layout(kind: Literal["writes", "reads"] = "writes"):
     """Seriated grid layout: cell index (row * side + col) for every neuron, base64 int16, layer-major."""
     import base64
     path = CACHE / f"layout_{kind}.npz"
@@ -565,9 +676,6 @@ def web(layer: int, n: int, first: int = 5, k: int = 2, zmin: float = 15, cap: i
     round(10 * z) * sign, hop."""
     rows = np.array([(*r[:4], round(r[4] * 10), r[5]) for r in cone_links(layer, n, k, zmin, cap, first, hops or None)], np.int16).reshape(-1, 6)
     return Response(rows.tobytes(), media_type="application/octet-stream", headers={"X-Web-Total": str(len(rows))})
-
-
-_idf = {}
 
 
 @app.get("/api/web/summary")
@@ -633,10 +741,6 @@ def web_summary(layer: int, n: int, first: int = 5, k: int = 2, top: int = 30, s
 # ---------- Claude: autointerp and chat ----------
 # Each chat is a `claude -p` session resumed turn by turn. Its tools come from agent_mcp.py, which reads through the
 # endpoints below and sends map actions back through /api/agent/ui into the chat's event stream.
-_chats = {}
-_act = {}
-
-
 def act_range(layer, n):
     if "pos" not in _act and os.path.exists(ACT_SCALE):
         z = np.load(ACT_SCALE)
@@ -1102,60 +1206,59 @@ _resource_stack = ExitStack()
 _static_directory = _resource_stack.enter_context(
     as_file(PACKAGE_RESOURCES.joinpath("static"))
 )
-app.state.resource_stack = _resource_stack
 app.mount("/", StaticFiles(directory=_static_directory, html=True), name="static")
+_route_app = app
+atexit.register(_resource_stack.close)
+
+
+def _start_preload(state: ExplorerState):
+    def go():
+        if NO_MODEL:
+            state.runtime.status = "no model"
+            if (state.cache / "vocab.json").is_file():
+                state.runtime.vocab_strings()
+                state.runtime.refresh_catalog()
+            return
+        state.runtime.ensure_loaded()
+        if not state.lens_index.exists():
+            state.lens_index.parent.mkdir(parents=True, exist_ok=True)
+            state.runtime.build_lens_index(state.lens_index)
+        state.runtime.vocab_strings()
+        if not state.act_scale.exists():
+            state.runtime.build_act_scale(state.act_scale)
+        state.runtime.refresh_catalog()
+
+    threading.Thread(target=go, daemon=True).start()
+
+
+def _create_app(state: ExplorerState) -> FastAPI:
+    instance = FastAPI()
+    instance.router.routes = list(_route_app.router.routes)
+    instance.user_middleware = list(_route_app.user_middleware)
+    instance.middleware_stack = None
+    instance.state.paths = state.paths
+    instance.state.runtime = state.runtime
+    instance.state.explorer = state
+    instance.state.resource_stack = _resource_stack
+
+    @instance.middleware("http")
+    async def bind_explorer_state(request, call_next):
+        token = _active_state.set(state)
+        try:
+            return await call_next(request)
+        finally:
+            _active_state.reset(token)
+
+    instance.router.add_event_handler("startup", lambda: _start_preload(state))
+    return instance
 
 
 def create_app(paths: ProjectPaths | None = None) -> FastAPI:
-    """Return the explorer app, optionally configured for an explicit project."""
-    global PATHS, RUNS, STATS, CACHE, NAMES, LENS_INDEX, ACT_SCALE
-    global AGENT_DIR, UPLOADS, AGENT_LOCAL, ROOT, rt
-    if paths is None or paths == PATHS:
-        return app
-
-    PATHS = paths
-    RUNS = paths.runs
-    STATS = paths.stats
-    CACHE = paths.cache
-    NAMES = CACHE / "names.json"
-    LENS_INDEX = CACHE / "lens_index.npz"
-    ACT_SCALE = CACHE / "act_scale.npz"
-    AGENT_DIR = CACHE / "agent"
-    UPLOADS = AGENT_DIR / "uploads"
-    AGENT_LOCAL = CACHE / "agent_prompt.local.md"
-    ROOT = paths.root
-    rt = Runtime(paths)
-    _cache.clear()
-    _ranked.clear()
-    _lens.clear()
-    _act.clear()
-    _infer.clear()
-    _idf.clear()
-    return app
+    """Create an explorer app with independent project and runtime state."""
+    return _create_app(ExplorerState(paths or ProjectPaths.discover()))
 
 
-@app.on_event("shutdown")
-def close_package_resources():
-    _resource_stack.close()
-
-@app.on_event("startup")
-def preload():
-    def go():
-        if NO_MODEL:
-            rt.status = "no model"
-            if (CACHE / "vocab.json").is_file():
-                rt.vocab_strings()
-                rt.refresh_catalog()
-            return
-        rt.ensure_loaded()
-        if not os.path.exists(LENS_INDEX):
-            os.makedirs(os.path.dirname(LENS_INDEX), exist_ok=True)
-            rt.build_lens_index(LENS_INDEX)
-        rt.vocab_strings()
-        if not os.path.exists(ACT_SCALE):
-            rt.build_act_scale(ACT_SCALE)
-        rt.refresh_catalog()
-    threading.Thread(target=go, daemon=True).start()
+app = _create_app(_fallback_state)
 
 
 if __name__ == "__main__":

@@ -8,10 +8,10 @@ rollout is kept, and the explorer lays the results out over a 3D view of the mod
 ## Explorer
 
     uv sync
-    uv run python -m neuron_explorer.explorer.server  # http://localhost:8791
+    uv run python explorer/server.py        # http://localhost:8791
 
-Reads sweep runs from `runs/` and per-layer stats from `stats/`, both produced by the sweep below; generated explorer
-indexes live in `cache/`. Loads Qwen3.5-4B locally (MPS, CUDA or CPU) for live
+Reads sweep runs from `runs/` and per-layer stats from `stats/`, both produced by the sweep below; the caches in
+`explorer/cache/` ship with the repo. Loads Qwen3.5-4B locally (MPS, CUDA or CPU) for live
 steered chat, lens, connections and live inference over your own text.
 
 - **map**: the model's layers in perspective, attention and MLP per layer, one point per neuron. Hover shows a neuron's
@@ -25,10 +25,10 @@ steered chat, lens, connections and live inference over your own text.
   connections, and a name.
 - **embeddings**: UMAP of a layer's rollouts, coloured by neuron, prompt, dose or kind.
 - **Claude** (fourth neuron-panel tab, or the right-edge handle): a chat running the `claude` CLI (installed and
-  logged in) with the packaged explorer MCP server. It reads neurons, cones and lenses, runs the
+  logged in) with the explorer as an MCP server (`explorer/agent_mcp.py`). It reads neurons, cones and lenses, runs the
   live model (steering, activations, next-token logprobs, ablations), moves the map, list and highlights, and has file
-  tools and a shell in your home folder. Its bundled prompts are under `neuron_explorer.explorer/prompts`; add
-  `cache/agent_prompt.local.md` for per-machine additions;
+  tools and a shell in your home folder. Its prompt is `explorer/agent_prompt.md` plus `explorer/agent_methodology.md`, and
+  `explorer/agent_prompt.local.md` when present (untracked, for your own additions);
   `EXPLORER_CLAUDE_MODEL` picks the model. The server answers only pages and tools on this machine.
 
 ## Sweep
@@ -55,9 +55,9 @@ and {free} × {+3}, plus one unsteered baseline per prompt.
 | `sweep/merge_runs.py` | joins sharded runs of one layer |
 | `sweep/check_equivalence.py` | HF vs vLLM steering and capture agreement |
 | `sweep/bench.py`, `sweep/peek.py` | throughput conditions; terminal views of a run |
-| `python -m neuron_explorer.explorer.build_embeddings` | `runs/<run>.umap.json` |
-| `python -m neuron_explorer.explorer.build_layout` | `cache/layout_writes.npz` |
-| `python -m neuron_explorer.explorer.build_connections` | `cache/connections.npz`: each neuron's 24 strongest direct-path links up and down |
+| `explorer/build_embeddings.py` | `runs/<run>.umap.json` |
+| `explorer/build_layout.py` | `explorer/cache/layout_writes.npz` |
+| `explorer/build_connections.py` | `explorer/cache/connections.npz`: each neuron's 24 strongest direct-path links up and down |
 | `sweep/capture_prefill.py` | `captures/<run>.mlp_in.npy`: MLP input at the last prompt token at the run's capture layers, steered |
 | `sweep/plot_attribution.py` | `runs/attribution/<prompt>.svg` and `.json`: attribution graph, circuit-tracer layout |
 | `sweep/check_attribution.py` | exactness checks of the attribution linearization |

@@ -1,7 +1,8 @@
 """Per-unit statistics for a sweep: distinctive words, how far above the random-direction null a unit's words sit, and
 text-breakdown numbers per dose. Writes one JSON record per unit for the explorer and prints the top of the ranking.
 
-    uv run python sweep/rank.py runs/q35-4b-L22.jsonl --out runs/q35-4b-L22.units.jsonl --show 40 --find 2742
+    uv run python -m neuron_explorer.sweep.rank runs/q35-4b-L22.jsonl \
+        --out runs/q35-4b-L22.units.jsonl --show 40 --find 2742
 
 For each unit (neuron or random direction):
     words        words over-represented in its rollouts vs the average unit, Poisson z = (count - mean) / sqrt(mean + 0.5),

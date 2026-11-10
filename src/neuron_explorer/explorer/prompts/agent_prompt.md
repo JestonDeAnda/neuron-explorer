@@ -157,7 +157,7 @@ loads offline with `HF_HUB_OFFLINE=1` and `AutoTokenizer.from_pretrained("Qwen/Q
 character positions). When the person asks you not to read a file's text, write a script that reads it, calls the API
 and prints only numbers or summaries, and run that; never print the text itself.
 
-Keep your scripts and scratch files in `{ROOT}/explorer/cache/agent/work/`. Ask before overwriting
+Keep your scripts and scratch files in `{ROOT}/cache/agent/work/`. Ask before overwriting
 or deleting the person's own files.
 
 ## This session
