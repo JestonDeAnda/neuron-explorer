@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -30,6 +31,18 @@ def _write_run(paths, name, layer):
 
 def test_ranking_is_importable_from_explorer_package():
     assert callable(compute_units)
+
+
+def test_model_free_explorer_sees_shipped_root_cache():
+    root = Path(__file__).resolve().parents[2]
+    paths = ProjectPaths.discover(root)
+    app = create_app(paths)
+
+    assert paths.cache == root / "cache"
+    assert app.state.explorer.act_scale.is_file()
+    assert app.state.explorer.lens_index.is_file()
+    assert app.state.runtime.vocab_strings()
+    app.state.runtime.close()
 
 
 def test_create_app_keeps_project_state_isolated(tmp_path):

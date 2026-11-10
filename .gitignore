@@ -2,23 +2,33 @@
 .worktrees/
 *.egg-info/
 __pycache__/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
 .DS_Store
 
 # sweep data and derived files
 runs/
 stats/
 captures/
-cache/
 output/
 logs/
-explorer/cache/connections.sqlite
+
+# shipped cache datasets are tracked; all other cache content is mutable
+cache/*
+!cache/act_scale.npz
+!cache/connections.npz
+!cache/layout_writes.npz
+!cache/lens_index.npz
+!cache/steer_index.npz
+!cache/vocab.json
 
 # third-party material
 source/
 tawny-owl/
 ref/
 scripts/mirror.log
-explorer/cache/agent/
 *.zip
 explorer/names.json
 explorer/*.local.md
