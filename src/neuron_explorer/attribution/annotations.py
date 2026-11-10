@@ -4,8 +4,25 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Protocol
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -13,11 +30,19 @@ class NeuronAnnotation:
     """Interpretability metadata for one neuron."""
 
     explanation: str | None = None
-    steer_up: list[str] = field(default_factory=list)
-    steer_down: list[str] = field(default_factory=list)
+    steer_up: tuple[str, ...] = ()
+    steer_down: tuple[str, ...] = ()
     kl_up: float | None = None
     kl_down: float | None = None
-    provenance: dict[str, Any] | None = None
+    provenance: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "steer_up", tuple(str(token) for token in self.steer_up))
+        object.__setattr__(
+            self, "steer_down", tuple(str(token) for token in self.steer_down)
+        )
+        if self.provenance is not None:
+            object.__setattr__(self, "provenance", _freeze(self.provenance))
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible copy of all annotation metadata."""
@@ -27,7 +52,7 @@ class NeuronAnnotation:
             "steer_down": list(self.steer_down),
             "kl_up": self.kl_up,
             "kl_down": self.kl_down,
-            "provenance": dict(self.provenance) if self.provenance is not None else None,
+            "provenance": _thaw(self.provenance),
         }
 
 

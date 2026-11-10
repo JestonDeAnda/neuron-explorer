@@ -1,4 +1,5 @@
 import json
+from collections.abc import Mapping
 
 import numpy as np
 import pytest
@@ -52,7 +53,35 @@ def test_dataset_catalog_loads_jsonl_and_normalizes_aliases(tmp_path):
     annotation = DatasetCatalog.from_path(path).lookup(5, 8109)
 
     assert annotation.explanation == "Texas state"
-    assert annotation.steer_up == [" Texas"]
+    assert annotation.steer_up == (" Texas",)
+
+
+def test_dataset_catalog_values_are_transitively_immutable(tmp_path):
+    path = tmp_path / "annotations.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    **RECORD,
+                    "provenance": {
+                        "review": {"labels": ["manual", "verified"]},
+                    },
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    annotation = DatasetCatalog.from_path(path).lookup(5, 8109)
+
+    assert isinstance(annotation.steer_up, tuple)
+    assert isinstance(annotation.provenance, Mapping)
+    assert isinstance(annotation.provenance["review"], Mapping)
+    assert annotation.provenance["review"]["labels"] == ("manual", "verified")
+    with pytest.raises(TypeError):
+        annotation.provenance["review"]["labels"][0] = "changed"
+    with pytest.raises(TypeError):
+        annotation.provenance["review"]["new"] = "changed"
 
 
 def test_dataset_catalog_rejects_duplicate_keys_by_default(tmp_path):
@@ -94,8 +123,8 @@ def test_cache_catalog_combines_names_and_steer_index(tmp_path):
     annotation = CacheCatalog(names_path, steer_path, vocab_path).lookup(0, 1)
 
     assert annotation.explanation == "Texas state"
-    assert annotation.steer_up == [" Texas", " unused"]
-    assert annotation.steer_down == [" California", " unused"]
+    assert annotation.steer_up == (" Texas", " unused")
+    assert annotation.steer_down == (" California", " unused")
     assert annotation.kl_up == pytest.approx(1.25)
     assert annotation.kl_down == pytest.approx(0.75)
 
@@ -116,8 +145,8 @@ def test_cache_catalog_uses_logit_lens_when_steer_index_is_missing(tmp_path):
         names_path, steer_path, vocab_path, logit_lens_path=lens_path
     ).lookup(0, 0)
 
-    assert annotation.steer_up == [" up"]
-    assert annotation.steer_down == [" down"]
+    assert annotation.steer_up == (" up",)
+    assert annotation.steer_down == (" down",)
 
 
 def test_empty_catalog_lookup_returns_none():
@@ -162,6 +191,6 @@ def test_composite_catalog_fills_fields_in_priority_order(tmp_path):
     ).lookup(5, 8109)
 
     assert annotation.explanation == "preferred"
-    assert annotation.steer_up == [" up"]
-    assert annotation.steer_down == [" down"]
+    assert annotation.steer_up == (" up",)
+    assert annotation.steer_down == (" down",)
     assert annotation.kl_up == pytest.approx(0.4)

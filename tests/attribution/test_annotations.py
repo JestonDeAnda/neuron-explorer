@@ -1,4 +1,8 @@
+import json
 from copy import deepcopy
+from dataclasses import FrozenInstanceError
+
+import pytest
 
 from neuron_explorer.attribution.annotations import NeuronAnnotation, annotate_graph
 from neuron_explorer.attribution.schema import validate_graph
@@ -125,3 +129,18 @@ def test_annotate_graph_retains_complete_source_metadata():
         "kl_down": 0.7,
         "provenance": {"dataset": "manual-v2", "reviewed": True},
     }
+    json.dumps(annotated)
+
+
+def test_neuron_annotation_detaches_and_freezes_constructor_values():
+    steer_up = [" Texas"]
+    provenance = {"review": {"labels": ["manual"]}}
+
+    annotation = NeuronAnnotation(steer_up=steer_up, provenance=provenance)
+    steer_up.append(" changed")
+    provenance["review"]["labels"].append("changed")
+
+    assert annotation.steer_up == (" Texas",)
+    assert annotation.provenance["review"]["labels"] == ("manual",)
+    with pytest.raises(FrozenInstanceError):
+        annotation.steer_up = (" changed",)

@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from .annotations import NeuronAnnotation, NeuronCatalog
+from neuron_explorer.attribution.annotations import NeuronAnnotation, NeuronCatalog
 
 DuplicatePolicy = Literal["error", "last"]
 _ANNOTATION_FIELDS = (
@@ -206,13 +206,13 @@ class CompositeCatalog:
 
         values: dict[str, Any] = {}
         for field_name in _ANNOTATION_FIELDS:
-            fallback = [] if field_name in {"steer_up", "steer_down"} else None
+            fallback = () if field_name in {"steer_up", "steer_down"} else None
             values[field_name] = next(
                 (
                     value
                     for annotation in annotations
                     if (value := getattr(annotation, field_name))
-                    not in (None, "", [], {})
+                    not in (None, "", (), {})
                 ),
                 fallback,
             )

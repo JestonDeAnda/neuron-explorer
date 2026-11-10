@@ -1,8 +1,11 @@
+import ast
 import json
+from pathlib import Path
 
 import pytest
 
 import neuron_explorer.attribution as attribution
+import neuron_explorer.attribution.catalogs as catalogs
 from neuron_explorer.attribution.schema import load_graph, save_graph, validate_graph
 
 
@@ -72,3 +75,16 @@ def test_package_exports_structured_attribution_interfaces():
     assert attribution.validate_graph is validate_graph
     assert callable(attribution.annotate_graph)
     assert attribution.NeuronAnnotation.__name__ == "NeuronAnnotation"
+
+
+@pytest.mark.parametrize("module", [attribution, catalogs])
+def test_package_modules_use_absolute_imports(module):
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+
+    relative = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.level
+    ]
+
+    assert relative == []
