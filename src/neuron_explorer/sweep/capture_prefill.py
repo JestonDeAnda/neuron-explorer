@@ -2,7 +2,7 @@
 gate and up projections read) at the last prompt token, at the run's capture layers, with the rollout's steering push
 applied at every prompt position. One prefill per rollout, batched by prompt.
 
-    uv run python sweep/capture_prefill.py runs/q35-4b-L22-full.jsonl runs/q35-4b-L13-r384.jsonl ...
+    uv run python scripts/capture_prefill.py runs/q35-4b-L22-full.jsonl runs/q35-4b-L13-r384.jsonl ...
 
 Writes captures/<run>.mlp_in.npy, float16 [rows, capture layers, hidden], row i = line i of the jsonl, and
 captures/<run>.mlp_in.json with the capture layers. Neuron activations follow as silu(x @ W_gate.T) * (x @ W_up.T).

@@ -21,9 +21,9 @@ Each rollout keeps:
     recoverable from these as silu(W_gate x) * (W_up x). Activations at generated tokens come from replaying
     the saved token ids through the model with the same steering, one teacher-forced forward pass.
 
-    uv run python sweep/steer_sweep.py --stats stats/q35-4b_L22.npz --neurons 2742 --run smoke-2742
-    uv run python sweep/steer_sweep.py --stats stats/q35-4b_L22.npz --design calib --neurons random:128 --random-controls 64 --run calib-L22
-    uv run python sweep/steer_sweep.py --stats stats/q35-4b_L22.npz --neurons all --run q35-4b-L22
+    uv run python scripts/steer_sweep.py --stats stats/q35-4b_L22.npz --neurons 2742 --run smoke-2742
+    uv run python scripts/steer_sweep.py --stats stats/q35-4b_L22.npz --design calib --neurons random:128 --random-controls 64 --run calib-L22
+    uv run python scripts/steer_sweep.py --stats stats/q35-4b_L22.npz --neurons all --run q35-4b-L22
 
 Rerunning the same command resumes: rollouts already in the jsonl are skipped.
 """

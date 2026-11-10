@@ -2,7 +2,7 @@
 see whether the capital the model names follows (Austin -> Sacramento). Interventions are real (the forward pass after
 the edited layer is recomputed), at one position only.
 
-    uv run python sweep/swap_state.py explore      # baselines, California-lens neurons, activation contrasts
+    uv run python scripts/swap_state.py explore      # baselines, California-lens neurons, activation contrasts
 """
 import argparse
 import json

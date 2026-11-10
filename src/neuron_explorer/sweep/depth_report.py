@@ -1,7 +1,7 @@
 """Depth curve from per-layer random-subset sweeps: how many neurons steer the model's text further from baseline
 than random directions do, per layer, plus coherence numbers per dose and each layer's strongest neurons.
 
-    uv run python sweep/depth_report.py --out runs/depth_report.json
+    uv run python scripts/depth_report.py --out runs/depth_report.json
 
 Ranks runs/q35-4b-L{l}-r384.jsonl, writing <run>.units.jsonl. Layers with only a full run (-full.jsonl) are subsampled
 to the same pool size (384 neurons, 64 controls) so word-cluster mass is comparable across layers.

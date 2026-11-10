@@ -19,6 +19,10 @@ dependencies = [
     "umap-learn>=0.5.12",
 ]
 
+[project.scripts]
+neuron-explorer = "neuron_explorer.explorer.cli:main"
+neuron-plot-attribution = "neuron_explorer.attribution.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest",

@@ -1,18 +1,16 @@
 """Checks explorer/attribution.py: the linearized Qwen3.5 reproduces the forward pass, its edges sum to each target
 (completeness), and each edge equals the change a source's removal causes in the frozen model (linearity).
 
-    uv run python sweep/check_attribution.py --tiny            # random 4-layer Qwen3.5, CPU, seconds
-    uv run python sweep/check_attribution.py                   # Qwen3.5-4B, float32
+    uv run python scripts/check_attribution.py --tiny            # random 4-layer Qwen3.5, CPU, seconds
+    uv run python scripts/check_attribution.py                   # Qwen3.5-4B, float32
 """
 import argparse
-import os
 import sys
 
 import torch
 import torch.nn.functional as F
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "explorer"))
-from attribution import Linearized  # noqa: E402
+from neuron_explorer.attribution import Linearized
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--tiny", action="store_true")

@@ -2,26 +2,32 @@
 index page: runs/attribution/interventions/{index.html, NN_<slug>.json, NN_<slug>.svg}. Clamped neurons are drawn as
 sources with an orange ring. Needs runs/attribution/swap_state.json (from `swap_state.py swap`).
 
-    uv run python sweep/plot_interventions.py            # all, skipping graphs already saved
-    uv run python sweep/plot_interventions.py --redo     # rebuild every graph
+    uv run python scripts/plot_interventions.py            # all, skipping graphs already saved
+    uv run python scripts/plot_interventions.py --redo     # rebuild every graph
 """
 import argparse
 import html
 import json
 import os
 import re
-import sys
 
 import numpy as np
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "explorer"))
-from attribution import build_graph  # noqa: E402
-from plot_attribution import svg  # noqa: E402
-from swap_state import CACHE, DALLAS, OTHERS, ROOT, Model, vocab  # noqa: E402
+from neuron_explorer.attribution import build_graph, render_svg
+from neuron_explorer.paths import ProjectPaths
+from neuron_explorer.sweep.interventions import (
+    DALLAS,
+    OTHERS,
+    Model,
+    annotate_intervention_graph,
+)
 
-OUT = os.path.join(ROOT, "runs", "attribution", "interventions")
+PATHS = ProjectPaths.discover()
+CACHE = str(PATHS.cache)
+OUT = str(PATHS.runs / "attribution" / "interventions")
+BUNDLE = str(PATHS.runs / "attribution" / "state_swap.html")
+INPUT = str(PATHS.runs / "attribution" / "swap_state.json")
+svg = render_svg
 SF = OTHERS["San Francisco"]
 WATCH = [" Austin", " Sacramento"]
 
@@ -82,14 +88,7 @@ def experiments(M, B, ps, texas, cal):
     return X
 
 
-def annotate(M, g, ids, v, st):
-    g["tokens"] = [M.tok.decode([i]) for i in ids]
-    g["target"] = M.tok.decode([g["token"]])
-    for x in g["nodes"]:
-        x["tok"] = g["tokens"][x["pos"]]
-        if x["kind"] == "neuron":
-            x["lens"] = [v[t] for t in st["up" if x["act"] > 0 else "down"][x["layer"], x["n"], :5]]
-    return g
+annotate = annotate_intervention_graph
 
 
 def index(rows):
@@ -149,23 +148,38 @@ def bundle(rows):
         svg = open(os.path.join(OUT, r["svg"])).read()
         body.append(f'<h3 id="g{r["i"]}">{r["i"]:02d}. {html.escape(r["title"])}</h3>\n{svg}')
     out.append("</table>")
-    path = os.path.join(ROOT, "runs", "attribution", "state_swap.html")
+    path = BUNDLE
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
         f.write("\n".join(out + body))
     print(path, os.path.getsize(path) // (1 << 20), "MB")
 
 
-def main():
+def main(argv=None):
+    global BUNDLE, CACHE, INPUT, OUT
     ap = argparse.ArgumentParser()
     ap.add_argument("--k", type=int, default=512)
     ap.add_argument("--redo", action="store_true")
-    a = ap.parse_args()
+    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
+    ap.add_argument("--input", default=INPUT)
+    ap.add_argument("--cache-dir", default=CACHE)
+    ap.add_argument("--output-dir", default=OUT)
+    ap.add_argument("--bundle-out", default=BUNDLE)
+    a = ap.parse_args(argv)
+    INPUT, CACHE, OUT, BUNDLE = (
+        a.input,
+        a.cache_dir,
+        a.output_dir,
+        a.bundle_out,
+    )
     os.makedirs(OUT, exist_ok=True)
-    saved = json.load(open(os.path.join(ROOT, "runs", "attribution", "swap_state.json")))
+    saved = json.load(open(INPUT))
     texas = [tuple(r[:2]) for r in saved["texas"]]
     cal = [tuple(r[:2]) for r in saved["california"]]
-    M = Model()
-    v, st = vocab(), np.load(os.path.join(CACHE, "steer_index.npz"))
+    M = Model(a.model)
+    with open(os.path.join(CACHE, "vocab.json")) as handle:
+        v = json.load(handle)
+    st = np.load(os.path.join(CACHE, "steer_index.npz"))
     ps = len(M.ids(SF)) - 2
     _, B = M.run(SF, capture=True)
     rows = []

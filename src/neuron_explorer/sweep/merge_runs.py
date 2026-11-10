@@ -1,6 +1,6 @@
 """Joins sharded sweep runs of one layer into a single run, one row per (kind, neuron, prompt, dose).
 
-    uv run python sweep/merge_runs.py runs/q35-4b-L22.jsonl runs/q35-4b-L22-s1.jsonl runs/q35-4b-L22-s2.jsonl \
+    uv run python scripts/merge_runs.py runs/q35-4b-L22.jsonl runs/q35-4b-L22-s1.jsonl runs/q35-4b-L22-s2.jsonl \
         runs/q35-4b-L22-s3.jsonl --out runs/q35-4b-L22-full.jsonl
 
 The merged run's meta.json is the first input's, with the shard list recorded under "shards".

@@ -1,6 +1,6 @@
 """Agreement between capture_prefill.py output and the vLLM fork's own captures for the same run.
 
-    python sweep/check_capture_prefill.py runs/mainrel-e2e.jsonl captures/mainrel-e2e
+    python scripts/check_capture_prefill.py runs/mainrel-e2e.jsonl captures/mainrel-e2e
 """
 import json
 import os

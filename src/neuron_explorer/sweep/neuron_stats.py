@@ -5,7 +5,7 @@ A neuron's activation is silu(gate) * up, the input to down_proj. Positive activ
 each regime per neuron over a mixed web + chat corpus, and saves W_down[:, n] for every neuron, which is the direction
 a steering push on neuron n adds to the residual stream.
 
-    uv run python sweep/neuron_stats.py --model Qwen/Qwen3.5-4B --layers 22 --tokens 2000000 --out stats/q35-4b
+    uv run python scripts/neuron_stats.py --model Qwen/Qwen3.5-4B --layers 22 --tokens 2000000 --out stats/q35-4b
 
 Writes stats/q35-4b_L22.npz with
     pp_max, nn_max   largest positive activation in the (+,+) and (-,-) regimes          [I]

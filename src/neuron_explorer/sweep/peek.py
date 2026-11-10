@@ -1,9 +1,9 @@
 """Terminal view of a sweep's rollouts, plus dose-response tables for calibration runs.
 
-    uv run python sweep/peek.py runs/calib-e2e.jsonl                  # every neuron, every rollout
-    uv run python sweep/peek.py runs/calib-e2e.jsonl --neuron 2742    # one neuron
-    uv run python sweep/peek.py runs/calib-e2e.jsonl --curves         # dose-response table, neurons vs random
-    uv run python sweep/peek.py runs/calib-e2e.jsonl --words          # distinctive words per unit, strongest first
+    uv run python scripts/peek.py runs/calib-e2e.jsonl                  # every neuron, every rollout
+    uv run python scripts/peek.py runs/calib-e2e.jsonl --neuron 2742    # one neuron
+    uv run python scripts/peek.py runs/calib-e2e.jsonl --curves         # dose-response table, neurons vs random
+    uv run python scripts/peek.py runs/calib-e2e.jsonl --words          # distinctive words per unit, strongest first
 
 Per rollout: dose, rel_push (push size / median residual norm), the generated token where it first departs from the
 unsteered baseline for that prompt (`=` if it never does), length-capped flag, distinct-4-gram ratio, mean chosen

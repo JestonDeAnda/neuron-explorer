@@ -3,27 +3,28 @@ each, the neurons they share at the same role (first operand, operator, second o
 tests of the shared set. A second calculation in the same three forms separates what belongs to this calculation
 from generic arithmetic / prompt machinery.
 
-    uv run python sweep/arith_forms.py               # graphs cached in runs/attribution/arith/, report beside them
-    uv run python sweep/arith_forms.py --redo        # rebuild the graphs
+    uv run python scripts/arith_forms.py               # graphs cached in runs/attribution/arith/, report beside them
+    uv run python scripts/arith_forms.py --redo        # rebuild the graphs
 """
 import argparse
 import html
 import json
 import os
 import random
-import sys
 
 import numpy as np
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(os.path.dirname(HERE), "explorer"))
-from attribution import build_graph  # noqa: E402
-from plot_attribution import svg  # noqa: E402
-from plot_interventions import annotate  # noqa: E402
-from swap_state import CACHE, ROOT, Model, vocab  # noqa: E402
+from neuron_explorer.attribution import build_graph, render_svg
+from neuron_explorer.paths import ProjectPaths
+from neuron_explorer.sweep.interventions import (
+    Model,
+    annotate_intervention_graph,
+)
 
-OUT = os.path.join(ROOT, "runs", "attribution", "arith")
+PATHS = ProjectPaths.discover()
+CACHE = str(PATHS.cache)
+OUT = str(PATHS.runs / "attribution" / "arith")
+svg = render_svg
 ZH = "零一二三四五六七八九"
 EN = "zero one two three four five six seven eight nine".split()
 OPS = {"-": ("减", "minus", "-"), "*": ("乘以", "times", "*"), "+": ("加", "plus", "+")}
@@ -63,14 +64,21 @@ def overlap(p, q):
     return sum(min(p[k]["w"], q[k]["w"]) for k in p.keys() & q.keys())
 
 
-def main():
+def main(argv=None):
+    global CACHE, OUT
     ap = argparse.ArgumentParser()
     ap.add_argument("--k", type=int, default=1024)
     ap.add_argument("--redo", action="store_true")
-    a = ap.parse_args()
+    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
+    ap.add_argument("--cache-dir", default=CACHE)
+    ap.add_argument("--output-dir", default=OUT)
+    a = ap.parse_args(argv)
+    CACHE, OUT = a.cache_dir, a.output_dir
     os.makedirs(OUT, exist_ok=True)
-    M = Model()
-    v, st = vocab(), np.load(os.path.join(CACHE, "steer_index.npz"))
+    M = Model(a.model)
+    with open(os.path.join(CACHE, "vocab.json")) as handle:
+        v = json.load(handle)
+    st = np.load(os.path.join(CACHE, "steer_index.npz"))
     lens = lambda l, n, s: [v[t] for t in st["up" if s > 0 else "down"][l, n, :6]]
 
     # ---------- graphs ----------
@@ -86,7 +94,20 @@ def main():
             path = os.path.join(OUT, f"{calc}_{form}.json")
             if a.redo or not os.path.exists(path):
                 ids = M.ids(t)
-                g = annotate(M, build_graph(M.lm, M.model.lm_head, ids, token=tid[0], k=a.k, max_edges=3000), ids, v, st)
+                g = annotate_intervention_graph(
+                    M,
+                    build_graph(
+                        M.lm,
+                        M.model.lm_head,
+                        ids,
+                        token=tid[0],
+                        k=a.k,
+                        max_edges=3000,
+                    ),
+                    ids,
+                    v,
+                    st,
+                )
                 json.dump(g, open(path, "w"), ensure_ascii=False)
                 print(f"built {calc} {form}: {t!r} -> {g['target']!r} p={g['prob']:.3f}", flush=True)
             G[calc, form] = json.load(open(path))
@@ -315,7 +336,7 @@ def page(G, T, report, text):
         with open(os.path.join(OUT, f"{c}_{f}.svg"), "w") as fh:
             fh.write(s)
         out.append(f'<h2 id="{c}-{f}">{html.escape(g["title"])}</h2>\n{s}')
-    path = os.path.join(ROOT, "runs", "attribution", "arith_forms.html")
+    path = os.path.join(os.path.dirname(OUT), "arith_forms.html")
     with open(path, "w") as fh:
         fh.write("\n".join(out))
     print(path)

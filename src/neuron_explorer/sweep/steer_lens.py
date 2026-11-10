@@ -5,7 +5,7 @@ few short contexts, runs one forward pass, and compares the last position's log-
 Keeps, per neuron and sign, the 12 tokens whose log-probability rises most (averaged over contexts) and the KL
 divergence from the unsteered prediction.
 
-    uv run python sweep/steer_lens.py --layers 0-7 --out stats/steer_lens
+    uv run python scripts/steer_lens.py --layers 0-7 --out stats/steer_lens
 
 Writes stats/steer_lens_L{l}.npz per layer: up_tok[N, 12], down_tok[N, 12] (token ids for the + push and - push),
 up_kl[N], down_kl[N].

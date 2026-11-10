@@ -1,7 +1,7 @@
 """Throughput of the steering fork on this GPU under three conditions, same prompt and fixed-length rollouts:
 unsteered, a distinct steering config per request, and steering plus a last_prompt mlp_in capture.
 
-    uv run python sweep/bench.py --stats stats/q35-4b_L22.npz --n 1280 --max-num-seqs 320
+    uv run python scripts/bench.py --stats stats/q35-4b_L22.npz --n 1280 --max-num-seqs 320
 """
 import argparse
 import time

@@ -6,7 +6,7 @@
 2. Capture: neuron activations recomputed from a captured mlp_in, silu(W_gate x) * (W_up x), match HF's activations
    at the same tokens (all prompt positions; capture positions must exist when a request is admitted).
 
-    uv run python sweep/check_equivalence.py --stats stats/q35-4b_L22.npz --neurons 2742,17,5000
+    uv run python scripts/check_equivalence.py --stats stats/q35-4b_L22.npz --neurons 2742,17,5000
 """
 import argparse
 import os
