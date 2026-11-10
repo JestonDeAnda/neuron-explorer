@@ -47,7 +47,9 @@ def test_every_script_is_covered_by_usage_documentation() -> None:
     executables = sorted(
         path
         for path in (ROOT / "scripts").iterdir()
-        if path.is_file() and path.suffix in {".py", ".sh"}
+        if path.is_file()
+        and path.name != "__init__.py"
+        and path.suffix in {".py", ".sh"}
     )
 
     missing = [path.name for path in executables if path.name not in documented]

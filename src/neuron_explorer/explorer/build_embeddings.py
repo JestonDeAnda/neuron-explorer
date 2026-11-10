@@ -5,21 +5,14 @@
 Writes <run>.emb.npy (normalized sentence embeddings, one row per jsonl line) and <run>.umap.json with parallel arrays:
 x, y, row (jsonl line index), kind, neuron, prompt, dose.
 """
-import argparse
 import json
 
 import numpy as np
-import umap
-from sentence_transformers import SentenceTransformer
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("jsonl")
-    ap.add_argument("--model", default="BAAI/bge-small-en-v1.5")
-    ap.add_argument("--chars", type=int, default=600, help="leading characters of each rollout to embed")
-    ap.add_argument("--neighbors", type=int, default=15)
-    a = ap.parse_args()
+def run_build_embeddings(a):
+    import umap
+    from sentence_transformers import SentenceTransformer
 
     rows = [json.loads(l) for l in open(a.jsonl)]
     import torch
@@ -38,7 +31,3 @@ def main():
     path = a.jsonl.replace(".jsonl", ".umap.json")
     json.dump(out, open(path, "w"))
     print(f"{len(rows)} rollouts -> {path}")
-
-
-if __name__ == "__main__":
-    main()

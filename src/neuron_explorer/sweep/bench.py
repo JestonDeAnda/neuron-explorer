@@ -3,26 +3,15 @@ unsteered, a distinct steering config per request, and steering plus a last_prom
 
     uv run python scripts/bench.py --stats stats/q35-4b_L22.npz --n 1280 --max-num-seqs 320
 """
-import argparse
 import time
 
 import numpy as np
-from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
-from vllm.inputs import TokensPrompt
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
-    ap.add_argument("--stats", required=True)
-    ap.add_argument("--n", type=int, default=1280)
-    ap.add_argument("--tokens", type=int, default=256)
-    ap.add_argument("--max-num-seqs", type=int, default=320)
-    ap.add_argument("--max-configs", type=int, default=512)
-    ap.add_argument("--gpu-mem", type=float, default=0.85)
-    ap.add_argument("--only", default="", help="comma-separated condition names")
-    a = ap.parse_args()
+def run_benchmark(a):
+    from transformers import AutoTokenizer
+    from vllm import LLM, SamplingParams
+    from vllm.inputs import TokensPrompt
 
     st = np.load(a.stats)
     layer, abs_max, w_down = int(st["layer"]), st["abs_max"], st["w_down"]
@@ -33,7 +22,7 @@ def main():
     llm = LLM(model=a.model, dtype="bfloat16", enable_steering=True, max_steering_configs=a.max_configs,
               max_num_seqs=a.max_num_seqs, max_model_len=len(ids) + a.tokens + 16, gpu_memory_utilization=a.gpu_mem,
               limit_mm_per_prompt={"image": 0, "video": 0},
-              capture_consumers=[{"name": "filesystem", "params": {"root": "/tmp/bench-captures"}}])
+              capture_consumers=[{"name": "filesystem", "params": {"root": a.capture_root}}])
     prompts = [TokensPrompt(prompt_token_ids=ids)] * a.n
     base = {"temperature": 0.0, "max_tokens": a.tokens, "ignore_eos": True}
 
@@ -71,7 +60,3 @@ def main():
               f"(building params {t1 - t0:.1f}s)",
               flush=True)
     llm.llm_engine.engine_core.shutdown(timeout=60)
-
-
-if __name__ == "__main__":
-    main()

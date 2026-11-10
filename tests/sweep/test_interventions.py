@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from types import SimpleNamespace
 
 from neuron_explorer.sweep.interventions import (
     DALLAS,
@@ -43,7 +44,7 @@ def test_build_state_swap_edits_reads_source_activations():
     ) == [(2, 6, 1, 10.0), (4, 6, 2, 24.0)]
 
 
-def test_explore_has_torch_available_for_activation_ranking(monkeypatch):
+def test_explore_has_torch_available_for_activation_ranking(monkeypatch, tmp_path):
     class FakeModel:
         tok = type(
             "Tokenizer",
@@ -75,7 +76,7 @@ def test_explore_has_torch_available_for_activation_ranking(monkeypatch):
     monkeypatch.setattr(swap_state, "load_vocabulary", lambda paths: ["other"])
     monkeypatch.setattr(swap_state.np, "load", lambda path: steer)
 
-    swap_state.explore(FakeModel())
+    swap_state.explore(FakeModel(), SimpleNamespace(cache=tmp_path))
 
 
 def test_state_swap_experiments_accept_attribution_rows():

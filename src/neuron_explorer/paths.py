@@ -35,7 +35,9 @@ class ProjectPaths:
                 "NEURON_EXPLORER_CAPTURES", project_root / "captures"
             ),
             cache=cls._override("NEURON_EXPLORER_CACHE", project_root / "cache"),
-            output=project_root / "output",
+            output=cls._override(
+                "NEURON_EXPLORER_OUTPUT", project_root / "output"
+            ),
         )
 
     @staticmethod

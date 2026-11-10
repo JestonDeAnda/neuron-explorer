@@ -12,7 +12,10 @@ By default the server uses `runs/`, `stats/`, `captures/`, `cache/`, and
 `--stats`, `--captures`, `--cache`, and `--output` override individual paths.
 The corresponding reusable environment variables are
 `NEURON_EXPLORER_ROOT`, `NEURON_EXPLORER_RUNS`, `NEURON_EXPLORER_STATS`,
-`NEURON_EXPLORER_CAPTURES`, and `NEURON_EXPLORER_CACHE`.
+`NEURON_EXPLORER_CAPTURES`, `NEURON_EXPLORER_CACHE`, and
+`NEURON_EXPLORER_OUTPUT`. Retained scripts that use these stores also accept
+`--root` and a focused override such as `--runs-dir`, `--cache-dir`, or
+`--out-dir`; explicit flags take precedence over environment defaults.
 
 Live inference defaults to `Qwen/Qwen3.5-4B`. `EXPLORER_MODEL` selects another
 model and `EXPLORER_NO_MODEL=1` prevents weight download/loading. CUDA is
@@ -79,7 +82,8 @@ to a grid.
 
 ```bash
 uv run python scripts/build_layout.py \
-  --model Qwen/Qwen3.5-4B --kind writes --pca 50 --neighbors 30
+  --model Qwen/Qwen3.5-4B --kind writes --pca 50 --neighbors 30 \
+  --out cache/layout_writes.npz
 ```
 
 Input is a Hugging Face model whose intermediate size is a perfect square.

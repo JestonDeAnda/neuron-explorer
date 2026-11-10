@@ -10,27 +10,18 @@ divergence from the unsteered prediction.
 Writes stats/steer_lens_L{l}.npz per layer: up_tok[N, 12], down_tok[N, 12] (token ids for the + push and - push),
 up_kl[N], down_kl[N].
 """
-import argparse
 import os
 import time
 
 import numpy as np
 import torch
-from transformers import AutoTokenizer, Qwen3_5ForConditionalGeneration
-
 CHAT = ["Who are you?", "Write whatever you like."]
 PLAIN = ["I think the most important thing to remember is", "Today we are going to talk about"]
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
-    ap.add_argument("--layers", default="0-31")
-    ap.add_argument("--dose", type=float, default=0.8)
-    ap.add_argument("--neurons-per-batch", type=int, default=96)
-    ap.add_argument("--k", type=int, default=12)
-    ap.add_argument("--out", default="stats/steer_lens")
-    a = ap.parse_args(argv)
+def run_steer_lens(a):
+    from transformers import AutoTokenizer, Qwen3_5ForConditionalGeneration
+
     lo, _, hi = a.layers.partition("-")
     layers = list(range(int(lo), int(hi or lo) + 1))
 
@@ -98,7 +89,3 @@ def main(argv=None):
         arrs = {k: torch.cat(v).numpy() for k, v in out.items()}
         np.savez(f"{a.out}_L{l}.npz", **arrs, dose=a.dose, contexts=np.array(CHAT + PLAIN))
         print(f"L{l}: {N} neurons in {time.time() - t0:.0f}s, KL+ median {np.median(arrs['up_kl']):.3f}", flush=True)
-
-
-if __name__ == "__main__":
-    main()

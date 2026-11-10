@@ -8,16 +8,11 @@
 
     uv run python scripts/check_equivalence.py --stats stats/q35-4b_L22.npz --neurons 2742,17,5000
 """
-import argparse
 import os
 import shutil
 
 import numpy as np
 import torch
-from transformers import AutoTokenizer, Qwen3_5ForConditionalGeneration
-from vllm import LLM, SamplingParams
-from vllm.inputs import TokensPrompt
-from vllm.v1.capture.consumers.filesystem.reader import read_request
 
 
 def common_prefix(a, b):
@@ -29,17 +24,11 @@ def common_prefix(a, b):
     return n
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
-    ap.add_argument("--stats", required=True)
-    ap.add_argument("--neurons", default="2742,17,5000")
-    ap.add_argument("--doses", default="10,-2")
-    ap.add_argument("--prompt", default="Who are you?")
-    ap.add_argument("--new", type=int, default=48)
-    ap.add_argument("--capture-gen", type=int, default=8)
-    ap.add_argument("--capture-root", default="captures-check")
-    a = ap.parse_args()
+def run_equivalence_check(a):
+    from transformers import AutoTokenizer, Qwen3_5ForConditionalGeneration
+    from vllm import LLM, SamplingParams
+    from vllm.inputs import TokensPrompt
+    from vllm.v1.capture.consumers.filesystem.reader import read_request
 
     st = np.load(a.stats)
     layer, abs_max, w_down = int(st["layer"]), st["abs_max"], st["w_down"]
@@ -122,7 +111,3 @@ def main():
     same_top = (recomputed.argmax(-1) == ref.argmax(-1)).float().mean()
     print(f"recomputed vs HF neuron activations: relative error per position {rel.cpu().numpy().round(4)}; "
           f"same top neuron at {same_top:.0%} of positions")
-
-
-if __name__ == "__main__":
-    main()

@@ -146,7 +146,7 @@ Purpose: compare neuron and random-control steering across layers.
 ```bash
 uv run python scripts/depth_report.py \
   --layers 0-31 --neurons 384 --controls 64 \
-  --out runs/depth_report.json
+  --runs-dir runs --out runs/depth_report.json
 ```
 
 It searches `runs/q35-4b-L<layer>-r<neurons>.jsonl`, falling back to
@@ -193,12 +193,13 @@ Purpose: benchmark unsteered, steered, capture, and logprob vLLM conditions.
 ```bash
 uv run python scripts/bench.py \
   --stats stats/q35-4b_L22.npz --n 1280 --tokens 256 \
-  --max-num-seqs 320 --max-configs 512 --gpu-mem 0.85
+  --max-num-seqs 320 --max-configs 512 --gpu-mem 0.85 \
+  --capture-root /tmp/bench-captures
 ```
 
 `--only` accepts comma-separated condition names such as
 `steered,sweep-varlen`. Input is a stats NPZ. Results are throughput lines on
-stdout; temporary captures go to `/tmp/bench-captures`. CUDA and the steering
+stdout; temporary captures go to `--capture-root`. CUDA and the steering
 vLLM fork are mandatory. Model files are cached, benchmark captures may be
 reused/overwritten by request ID, and there is no benchmark resume.
 
@@ -229,11 +230,11 @@ captures.
 
 ```bash
 uv run python scripts/check_capture_prefill.py \
-  runs/mainrel-e2e.jsonl captures/mainrel-e2e
+  runs/mainrel-e2e.jsonl captures/mainrel-e2e --captures captures
 ```
 
 The first input is sweep JSONL; the second is a fork capture directory. The
-command also reads `captures/<run>.mlp_in.{npy,json}` and prints rollout counts
+command reads `<captures>/<run>.mlp_in.{npy,json}` and prints rollout counts
 plus median/p95/max relative error by layer. It requires NumPy and the steering
 fork's capture reader, but performs no model inference and can run on CPU. It
 writes nothing and has no cache/resume behavior.

@@ -43,7 +43,8 @@ Purpose: run fixed follow-up controls using the saved California group:
 alternate Dallas probes, greedy completions, and edits applied to other cities.
 
 ```bash
-uv run python scripts/swap_followup.py
+uv run python scripts/swap_followup.py \
+  --input runs/attribution/swap_state.json
 ```
 
 It reads `runs/attribution/swap_state.json`, loads Qwen3.5, captures the San

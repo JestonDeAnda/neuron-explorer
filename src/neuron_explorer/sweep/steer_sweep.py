@@ -27,7 +27,6 @@ Each rollout keeps:
 
 Rerunning the same command resumes: rollouts already in the jsonl are skipped.
 """
-import argparse
 import functools
 import json
 import os
@@ -81,35 +80,10 @@ def rollout_record(out, job, layer, top_k):
     }
 
 
-def main(argv=None):
+def run_steer_sweep(a):
     from transformers import AutoConfig, AutoTokenizer
     from vllm import LLM, SamplingParams
     from vllm.inputs import TokensPrompt
-
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
-    ap.add_argument("--stats", required=True, help="npz from neuron_stats.py for the layer to steer")
-    ap.add_argument("--neurons", default="all", help='"all", "random:128", "2742", "0-99", or "1,5,9-12"')
-    ap.add_argument("--design", default="main", choices=sorted(DESIGNS))
-    ap.add_argument("--dose-unit", default="absmax", choices=["absmax", "rel"], help="absmax: dose x the neuron's "
-                    "abs_max; rel: dose x the median residual norm, the same push size for every neuron")
-    ap.add_argument("--run", required=True, help="run name: output file and capture tag")
-    ap.add_argument("--out-dir", default="runs")
-    ap.add_argument("--max-tokens", type=int, default=256, help="steered rollouts often loop; this bounds them")
-    ap.add_argument("--top-k", type=int, default=5, help="alternative tokens kept per generated step")
-    ap.add_argument("--capture-layers", default="+0,+1,+4,+8", help="mlp_in layers to capture, relative to the "
-                    "steered layer; empty string turns capture off")
-    ap.add_argument("--capture-root", default="captures")
-    ap.add_argument("--capture-layout", default="packed", choices=["packed", "sharded"], help="packed publishes each "
-                    "rollout when it finishes; sharded publishes only when a shard seals")
-    ap.add_argument("--random-controls", type=int, default=256, help="random-direction controls spread through the run")
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--chunk", type=int, default=4000, help="requests per generate call (one jsonl flush each)")
-    ap.add_argument("--max-configs", type=int, default=512, help="distinct steering configs resident at once")
-    ap.add_argument("--max-num-seqs", type=int, default=256, help="concurrent sequences; capped by the per-sequence "
-                    "linear-attention state memory (about 350 on a 24 GB card at --gpu-mem 0.85)")
-    ap.add_argument("--gpu-mem", type=float, default=0.85)
-    a = ap.parse_args(argv)
 
     st = np.load(a.stats)
     layer, abs_max, w_down = int(st["layer"]), st["abs_max"], st["w_down"]
@@ -218,7 +192,3 @@ def main(argv=None):
                   f"{len(chunk) / dt:.1f} rollouts/s", flush=True)
 
     llm.llm_engine.engine_core.shutdown(timeout=300)  # a clean engine shutdown seals the sharded captures
-
-
-if __name__ == "__main__":
-    main()

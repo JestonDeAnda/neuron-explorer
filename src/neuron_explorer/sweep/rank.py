@@ -12,7 +12,6 @@ For each unit (neuron or random direction):
     per_prompt   for its strongest words, which prompts they appear on
     dose         per dose: mean distinct-4-gram ratio, share of length-capped rollouts, mean chosen logprob
 """
-import argparse
 import collections
 import json
 import re
@@ -81,16 +80,7 @@ def compute_units(rows, max_rel=1.6, top_words=12):
     return records
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("jsonl")
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--max-rel", type=float, default=1.6)
-    ap.add_argument("--top-words", type=int, default=12)
-    ap.add_argument("--show", type=int, default=30)
-    ap.add_argument("--find", default="", help="comma-separated neuron ids to report ranks for")
-    a = ap.parse_args(argv)
-
+def run_rank(a):
     records = compute_units([json.loads(l) for l in open(a.jsonl)], a.max_rel, a.top_words)
     with open(a.out, "w") as f:
         for r in records:
@@ -112,7 +102,3 @@ def main(argv=None):
             ws = ", ".join(f"{w}({c})" for w, c, _ in rec["words"][:6])
             print(f"neuron {n}: rank {rank}/{len(neurons)} among neurons, mass {rec['mass']:.1f}, null_pct {rec['null_pct']}, "
                   f"{ws}")
-
-
-if __name__ == "__main__":
-    main()

@@ -4,7 +4,6 @@ import json
 
 import torch
 
-from neuron_explorer.paths import ProjectPaths
 from neuron_explorer.sweep.interventions import (
     DALLAS,
     OTHERS,
@@ -93,10 +92,8 @@ def run_followups(model, california, source_activations, source_position):
         show(model, text, swapped, [" Sacramento"], f"{city} swapped")
 
 
-def main(argv=None):
-    del argv
-    paths = ProjectPaths.discover()
-    with (paths.runs / "attribution" / "swap_state.json").open() as handle:
+def run_swap_followup(input_path):
+    with open(input_path) as handle:
         saved = json.load(handle)
     california = [tuple(row[:2]) for row in saved["california"]]
     model = Model()
@@ -104,7 +101,3 @@ def main(argv=None):
     source_position = len(model.ids(source)) - 2
     _, source_activations = model.run(source, capture=True)
     run_followups(model, california, source_activations, source_position)
-
-
-if __name__ == "__main__":
-    main()

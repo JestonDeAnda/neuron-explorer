@@ -14,18 +14,15 @@ Writes stats/q35-4b_L22.npz with
     w_down           down_proj columns, one row per neuron                                [I, H] float16
     resid_norm_q10_50_90   quantiles of the per-token residual norm leaving the layer (scale for push sizes)
 """
-import argparse
 import itertools
 import os
 import time
 
 import numpy as np
 import torch
-from datasets import load_dataset
-from transformers import AutoModelForImageTextToText, AutoTokenizer
-
-
 def text_stream(tok, seed):
+    from datasets import load_dataset
+
     web = load_dataset("HuggingFaceFW/fineweb-edu", "sample-10BT", split="train", streaming=True).shuffle(seed=seed)
     chat = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft", streaming=True).shuffle(seed=seed)
     for w, c in zip(web, chat):
@@ -68,16 +65,9 @@ class RegimeStats:
         self.np_min = torch.minimum(self.np_min, torch.where(~gp & up_, a, pinf).amin(0))
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
-    ap.add_argument("--layers", default="22", help="comma-separated decoder layer indices")
-    ap.add_argument("--tokens", type=int, default=2_000_000)
-    ap.add_argument("--seq-len", type=int, default=1024)
-    ap.add_argument("--batch", type=int, default=16)
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", default="stats/q35-4b")
-    a = ap.parse_args(argv)
+def run_neuron_stats(a):
+    from transformers import AutoModelForImageTextToText, AutoTokenizer
+
     layers = [int(x) for x in a.layers.split(",")]
 
     tok = AutoTokenizer.from_pretrained(a.model)
@@ -116,7 +106,3 @@ def main(argv=None):
         dn_top = (nn > pp).mean()
         print(f"L{l}: abs_max median {np.median(abs_max):.3f} [{abs_max.min():.3f}, {abs_max.max():.3f}]; "
               f"(-,-) regime holds the positive max for {dn_top:.1%} of neurons -> {path}")
-
-
-if __name__ == "__main__":
-    main()

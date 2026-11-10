@@ -5,7 +5,6 @@ sources with an orange ring. Needs runs/attribution/swap_state.json (from `swap_
     uv run python scripts/plot_interventions.py            # all, skipping graphs already saved
     uv run python scripts/plot_interventions.py --redo     # rebuild every graph
 """
-import argparse
 import html
 import json
 import os
@@ -14,7 +13,6 @@ import re
 import numpy as np
 
 from neuron_explorer.attribution import build_graph, render_svg
-from neuron_explorer.paths import ProjectPaths
 from neuron_explorer.sweep.interventions import (
     DALLAS,
     OTHERS,
@@ -22,11 +20,10 @@ from neuron_explorer.sweep.interventions import (
     annotate_intervention_graph,
 )
 
-PATHS = ProjectPaths.discover()
-CACHE = str(PATHS.cache)
-OUT = str(PATHS.runs / "attribution" / "interventions")
-BUNDLE = str(PATHS.runs / "attribution" / "state_swap.html")
-INPUT = str(PATHS.runs / "attribution" / "swap_state.json")
+CACHE = ""
+OUT = ""
+BUNDLE = ""
+INPUT = ""
 svg = render_svg
 SF = OTHERS["San Francisco"]
 WATCH = [" Austin", " Sacramento"]
@@ -155,17 +152,8 @@ def bundle(rows):
     print(path, os.path.getsize(path) // (1 << 20), "MB")
 
 
-def main(argv=None):
+def run_plot_interventions(a):
     global BUNDLE, CACHE, INPUT, OUT
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--k", type=int, default=512)
-    ap.add_argument("--redo", action="store_true")
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
-    ap.add_argument("--input", default=INPUT)
-    ap.add_argument("--cache-dir", default=CACHE)
-    ap.add_argument("--output-dir", default=OUT)
-    ap.add_argument("--bundle-out", default=BUNDLE)
-    a = ap.parse_args(argv)
     INPUT, CACHE, OUT, BUNDLE = (
         a.input,
         a.cache_dir,
@@ -207,7 +195,3 @@ def main(argv=None):
               flush=True)
     bundle(rows)
     print(os.path.join(OUT, "index.html"))
-
-
-if __name__ == "__main__":
-    main()

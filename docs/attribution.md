@@ -34,8 +34,10 @@ Text mode writes the SVG and a same-stem `.json`; the default SVG is
 `runs/attribution/<prompt-slug>.svg`. JSON mode validates and renders the input,
 and writes annotations back to that JSON if catalogs enrich it. SVG
 `--edges`/`--labels` only control presentation, not graph computation. Existing
-outputs are overwritten. The command has no partial resume; a saved JSON can
-be rendered repeatedly without model inference.
+outputs are overwritten. Remote JSON is canonicalized and saved before SVG
+rendering, so a renderer failure still leaves a reusable graph. The command has
+no partial resume; a saved JSON can be rendered repeatedly without model
+inference.
 
 Catalog flags may be repeated and are applied in command-line order:
 

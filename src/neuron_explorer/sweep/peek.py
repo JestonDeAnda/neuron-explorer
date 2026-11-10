@@ -9,7 +9,6 @@ Per rollout: dose, rel_push (push size / median residual norm), the generated to
 unsteered baseline for that prompt (`=` if it never does), length-capped flag, distinct-4-gram ratio, mean chosen
 logprob, then the opening of the text.
 """
-import argparse
 import collections
 import json
 import re
@@ -106,19 +105,7 @@ def distinctive_words(rows, base, max_rel, top):
         print(f"{kind:6s} {n:6d}  z {best:4.1f}  ({n_r} rollouts)  {words}")
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("jsonl")
-    ap.add_argument("--neuron", type=int)
-    ap.add_argument("--kind", default=None, help="neuron or random")
-    ap.add_argument("--curves", action="store_true")
-    ap.add_argument("--words", action="store_true", help="distinctive words per unit, sorted by how many of its "
-                    "rollouts share its top word")
-    ap.add_argument("--max-rel", type=float, default=1.6, help="--words ignores rollouts pushed harder than this")
-    ap.add_argument("--top", type=int, default=6)
-    ap.add_argument("--width", type=int, default=110)
-    a = ap.parse_args()
-
+def run_peek(a):
     rows = [json.loads(l) for l in open(a.jsonl)]
     base = {r["prompt"]: r for r in rows if r["kind"] == "baseline"}
     steered = [r for r in rows if r["kind"] != "baseline"]
@@ -137,7 +124,3 @@ def main():
         print(f"\n== {kind} {n}" + (f" (scale from neuron {ref})" if kind == "random" else "") +
               f"  L{rs[0]['layer']}")
         show(rs, base, a.width)
-
-
-if __name__ == "__main__":
-    main()

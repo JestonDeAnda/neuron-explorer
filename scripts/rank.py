@@ -1,18 +1,8 @@
 #!/usr/bin/env python3
-"""Thin command wrapper for ``neuron_explorer.sweep.rank``."""
-
+"""Rank sweep units by distinctive word clusters."""
 import argparse
-import importlib
-import sys
-
 
 def main():
-    if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
-        argparse.ArgumentParser(description=__doc__).parse_args()
-    command = importlib.import_module("neuron_explorer.sweep.rank")
-    entry = getattr(command, "main", None)
-    return entry() if entry is not None else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    p=argparse.ArgumentParser(description=__doc__); p.add_argument("jsonl"); p.add_argument("--out",required=True); p.add_argument("--max-rel",type=float,default=1.6); p.add_argument("--top-words",type=int,default=12); p.add_argument("--show",type=int,default=30); p.add_argument("--find",default=""); a=p.parse_args()
+    from neuron_explorer.sweep.rank import run_rank; run_rank(a)
+if __name__ == "__main__": main()

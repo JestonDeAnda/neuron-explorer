@@ -4,12 +4,10 @@ the edited layer is recomputed), at one position only.
 
     uv run python scripts/swap_state.py explore      # baselines, California-lens neurons, activation contrasts
 """
-import argparse
 import json
 
 import numpy as np
 import torch
-from neuron_explorer.paths import ProjectPaths
 from neuron_explorer.sweep.interventions import (
     DALLAS,
     OTHERS,
@@ -20,8 +18,7 @@ from neuron_explorer.sweep.interventions import (
 )
 
 
-def explore(M):
-    paths = ProjectPaths.discover()
+def explore(M, paths):
     v, st = load_vocabulary(paths), np.load(paths.cache / "steer_index.npz")
     print("== baselines")
     for name, text in [("Dallas", DALLAS)] + list(OTHERS.items()):
@@ -65,8 +62,7 @@ def group(M, text, pos, max_layer, k):
     return attribution_group(M, text, pos, max_layer, k)
 
 
-def swap(M, max_layer, k, out):
-    paths = ProjectPaths.discover()
+def swap(M, max_layer, k, out, paths):
     v, st = load_vocabulary(paths), np.load(paths.cache / "steer_index.npz")
     td, ts = M.ids(DALLAS), M.ids(OTHERS["San Francisco"])
     pd, ps = len(td) - 2, len(ts) - 2
@@ -111,20 +107,9 @@ def swap(M, max_layer, k, out):
         print(out)
 
 
-def main(argv=None):
-    paths = ProjectPaths.discover()
-    ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["explore", "swap"])
-    ap.add_argument("--max-layer", type=int, default=12, help="deepest layer the state groups are taken from")
-    ap.add_argument("--k", type=int, default=512, help="attribution candidates per graph")
-    ap.add_argument("--out", default=str(paths.runs / "attribution" / "swap_state.json"))
-    a = ap.parse_args(argv)
+def run_swap_state(a):
     M = Model()
     if a.cmd == "explore":
-        explore(M)
+        explore(M, a.paths)
     else:
-        swap(M, a.max_layer, a.k, a.out)
-
-
-if __name__ == "__main__":
-    main()
+        swap(M, a.max_layer, a.k, a.out, a.paths)

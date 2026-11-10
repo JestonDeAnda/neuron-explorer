@@ -6,7 +6,6 @@ than random directions do, per layer, plus coherence numbers per dose and each l
 Ranks runs/q35-4b-L{l}-r384.jsonl, writing <run>.units.jsonl. Layers with only a full run (-full.jsonl) are subsampled
 to the same pool size (384 neurons, 64 controls) so word-cluster mass is comparable across layers.
 """
-import argparse
 import json
 import os
 import random
@@ -107,14 +106,10 @@ def build_depth_report(layers, neurons=384, controls=64, runs_dir="runs"):
     return report
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--layers", default="0-31")
-    parser.add_argument("--neurons", type=int, default=384)
-    parser.add_argument("--controls", type=int, default=64)
-    parser.add_argument("--out", default="runs/depth_report.json")
-    args = parser.parse_args(argv)
-    report = build_depth_report(args.layers, args.neurons, args.controls)
+def run_depth_report(args):
+    report = build_depth_report(
+        args.layers, args.neurons, args.controls, args.runs_dir
+    )
     for row in report:
         print(
             f"L{row['layer']:<2}{'*' if row['subsampled'] else ' '} "
@@ -129,9 +124,6 @@ def main(argv=None):
             ),
             flush=True,
         )
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as handle:
         json.dump(report, handle, indent=1)
-
-
-if __name__ == "__main__":
-    main()

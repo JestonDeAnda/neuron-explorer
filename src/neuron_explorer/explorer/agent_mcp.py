@@ -227,26 +227,27 @@ def reply(id_, result=None, error=None):
     sys.stdout.flush()
 
 
-for line in sys.stdin:
-    if not line.strip():
-        continue
-    m = json.loads(line)
-    method, id_ = m.get("method"), m.get("id")
-    if id_ is None:
-        continue  # notifications
-    if method == "initialize":
-        reply(id_, {"protocolVersion": m["params"].get("protocolVersion", "2025-06-18"),
-                    "capabilities": {"tools": {}}, "serverInfo": {"name": "explorer", "version": "0.1"}})
-    elif method == "tools/list":
-        reply(id_, {"tools": TOOLS})
-    elif method == "tools/call":
-        p = m["params"]
-        try:
-            out = call(p["name"], p.get("arguments") or {})
-            reply(id_, {"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]})
-        except Exception as e:  # tool errors go back to the model, not the protocol
-            reply(id_, {"content": [{"type": "text", "text": f"error: {e}"}], "isError": True})
-    elif method == "ping":
-        reply(id_, {})
-    else:
-        reply(id_, error={"code": -32601, "message": f"method not found: {method}"})
+def run_server():
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        m = json.loads(line)
+        method, id_ = m.get("method"), m.get("id")
+        if id_ is None:
+            continue  # notifications
+        if method == "initialize":
+            reply(id_, {"protocolVersion": m["params"].get("protocolVersion", "2025-06-18"),
+                        "capabilities": {"tools": {}}, "serverInfo": {"name": "explorer", "version": "0.1"}})
+        elif method == "tools/list":
+            reply(id_, {"tools": TOOLS})
+        elif method == "tools/call":
+            p = m["params"]
+            try:
+                out = call(p["name"], p.get("arguments") or {})
+                reply(id_, {"content": [{"type": "text", "text": json.dumps(out, ensure_ascii=False)}]})
+            except Exception as e:  # tool errors go back to the model, not the protocol
+                reply(id_, {"content": [{"type": "text", "text": f"error: {e}"}], "isError": True})
+        elif method == "ping":
+            reply(id_, {})
+        else:
+            reply(id_, error={"code": -32601, "message": f"method not found: {method}"})

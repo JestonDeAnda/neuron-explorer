@@ -70,6 +70,7 @@ AGENT_METHOD = PACKAGE_RESOURCES.joinpath("prompts", "agent_methodology.md")
 @dataclass
 class ExplorerState:
     paths: ProjectPaths
+    port: int = PORT
     runtime: Runtime = field(init=False)
     layer_cache: dict[Any, Any] = field(default_factory=dict)
     ranked: dict[Any, Any] = field(default_factory=dict)
@@ -197,22 +198,6 @@ _chats = _StateAttribute("chats")
 _act = _StateAttribute("activation_ranges")
 
 app = FastAPI()
-
-
-# only this machine's own pages and tools: a page on another site (or a DNS name rebound to 127.0.0.1) can't reach
-# the API, which runs the model and a Claude agent with a shell
-LOCAL_HOSTS = {f"localhost:{PORT}", f"127.0.0.1:{PORT}", f"[::1]:{PORT}"}
-
-
-@app.middleware("http")
-async def local_only(request, call_next):
-    from urllib.parse import urlparse
-    origin = request.headers.get("origin")
-    if (request.headers.get("host") not in LOCAL_HOSTS
-            or (origin and urlparse(origin).netloc not in LOCAL_HOSTS)
-            or request.headers.get("sec-fetch-site") in ("cross-site", "same-site")):
-        return PlainTextResponse("forbidden", status_code=403)
-    return await call_next(request)
 
 
 @app.middleware("http")
@@ -1122,7 +1107,7 @@ async def agent_chat(req: Request):
         msg = f"[The person has L{int(b['layer'])} N{int(b['n'])} open in the explorer.]\n\n{msg}"
     os.makedirs(AGENT_DIR, exist_ok=True)
     mcp = {"mcpServers": {"explorer": {"command": sys.executable, "args": ["-m", "neuron_explorer.explorer.agent_mcp"],
-                                       "env": {"EXPLORER_URL": f"http://127.0.0.1:{PORT}", "EXPLORER_CHAT": cid}}}}
+                                       "env": {"EXPLORER_URL": f"http://127.0.0.1:{_state().port}", "EXPLORER_CHAT": cid}}}}
     content = [{"type": "text", "text": msg}] + [blk for a in b.get("attachments") or [] if (blk := attachment_block(a))]
     cmd = ["claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
            "--system-prompt-file", agent_prompt_file(), "--mcp-config", json.dumps(mcp), "--strict-mcp-config",
@@ -1233,6 +1218,8 @@ def _start_preload(state: ExplorerState):
 
 
 def _create_app(state: ExplorerState) -> FastAPI:
+    from urllib.parse import urlparse
+
     instance = FastAPI()
     instance.router.routes = list(_route_app.router.routes)
     instance.user_middleware = list(_route_app.user_middleware)
@@ -1241,6 +1228,23 @@ def _create_app(state: ExplorerState) -> FastAPI:
     instance.state.runtime = state.runtime
     instance.state.explorer = state
     instance.state.resource_stack = _resource_stack
+
+    local_hosts = {
+        f"localhost:{state.port}",
+        f"127.0.0.1:{state.port}",
+        f"[::1]:{state.port}",
+    }
+
+    @instance.middleware("http")
+    async def local_only(request, call_next):
+        origin = request.headers.get("origin")
+        if (
+            request.headers.get("host") not in local_hosts
+            or (origin and urlparse(origin).netloc not in local_hosts)
+            or request.headers.get("sec-fetch-site") in ("cross-site", "same-site")
+        ):
+            return PlainTextResponse("forbidden", status_code=403)
+        return await call_next(request)
 
     @instance.middleware("http")
     async def bind_explorer_state(request, call_next):
@@ -1255,9 +1259,9 @@ def _create_app(state: ExplorerState) -> FastAPI:
     return instance
 
 
-def create_app(paths: ProjectPaths | None = None) -> FastAPI:
+def create_app(paths: ProjectPaths | None = None, *, port: int = PORT) -> FastAPI:
     """Create an explorer app with independent project and runtime state."""
-    return _create_app(ExplorerState(paths or ProjectPaths.discover()))
+    return _create_app(ExplorerState(paths or ProjectPaths.discover(), port=port))
 
 
 app = _create_app(_fallback_state)

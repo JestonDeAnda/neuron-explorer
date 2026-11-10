@@ -1,18 +1,8 @@
 #!/usr/bin/env python3
-"""Thin command wrapper for ``neuron_explorer.tools.mirror``."""
-
+"""Mirror an explorer site and its linked assets."""
 import argparse
-import importlib
-import sys
-
 
 def main():
-    if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
-        argparse.ArgumentParser(description=__doc__).parse_args()
-    command = importlib.import_module("neuron_explorer.tools.mirror")
-    entry = getattr(command, "main", None)
-    return entry() if entry is not None else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    p=argparse.ArgumentParser(description=__doc__); p.add_argument("output"); p.add_argument("--base-url",default="https://already-clean.goodfire.com/"); p.add_argument("--workers",type=int,default=24); a=p.parse_args()
+    from neuron_explorer.tools.mirror import run_mirror; run_mirror(a.output,a.base_url,a.workers)
+if __name__ == "__main__": main()

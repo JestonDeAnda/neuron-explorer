@@ -7,28 +7,19 @@ applied at every prompt position. One prefill per rollout, batched by prompt.
 Writes captures/<run>.mlp_in.npy, float16 [rows, capture layers, hidden], row i = line i of the jsonl, and
 captures/<run>.mlp_in.json with the capture layers. Neuron activations follow as silu(x @ W_gate.T) * (x @ W_up.T).
 """
-import argparse
 import json
 import os
 import time
 
 import numpy as np
 import torch
-from transformers import AutoTokenizer, Qwen3_5ForConditionalGeneration
-
-
 class Stop(Exception):
     pass
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("runs", nargs="+")
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
-    ap.add_argument("--batch", type=int, default=256)
-    ap.add_argument("--seed", type=int, default=0, help="the sweep's --seed (random-control directions)")
-    ap.add_argument("--out-dir", default="captures")
-    a = ap.parse_args(argv)
+def run_capture_prefill(a):
+    from transformers import AutoTokenizer, Qwen3_5ForConditionalGeneration
+
     os.makedirs(a.out_dir, exist_ok=True)
 
     tok = AutoTokenizer.from_pretrained(a.model)
@@ -104,7 +95,3 @@ def main(argv=None):
         json.dump({"run": name, "capture_layers": cap_layers, "hook": "mlp_in", "position": "last_prompt",
                    "rows": len(rows)}, open(out_path.replace(".npy", ".json"), "w"))
         print(f"{name}: {len(rows)} rows, layers {cap_layers}, {time.time() - t0:.0f}s", flush=True)
-
-
-if __name__ == "__main__":
-    main()

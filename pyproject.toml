@@ -20,8 +20,8 @@ dependencies = [
 ]
 
 [project.scripts]
-neuron-explorer = "neuron_explorer.explorer.cli:main"
-neuron-plot-attribution = "neuron_explorer.attribution.cli:main"
+neuron-explorer = "scripts.serve_explorer:main"
+neuron-plot-attribution = "scripts.plot_attribution:main"
 
 [dependency-groups]
 dev = [
@@ -29,11 +29,16 @@ dev = [
 ]
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+packages = [
+    "neuron_explorer",
+    "neuron_explorer.attribution",
+    "neuron_explorer.explorer",
+    "neuron_explorer.sweep",
+    "neuron_explorer.tools",
+    "scripts",
+]
+package-dir = {neuron_explorer = "src/neuron_explorer", scripts = "scripts"}
 include-package-data = true
-
-[tool.setuptools.packages.find]
-where = ["src"]
 
 [tool.setuptools.package-data]
 "neuron_explorer.explorer" = ["static/*", "prompts/*.md"]

@@ -1,6 +1,7 @@
-import re, sys, os, urllib.parse, concurrent.futures as cf, urllib.request
+import re, os, urllib.parse, concurrent.futures as cf, urllib.request
+
 BASE = "https://already-clean.goodfire.com/"
-OUT = sys.argv[1]
+OUT = ""
 TEXT_EXT = ('.html','.css','.js','.mjs','.json','.md','.svg','.txt')
 ref_re = re.compile(r'''(?:src|href|data-src|poster|srcset)\s*=\s*["']([^"']+)["']|url\(\s*["']?([^"')]+)["']?\s*\)|["'`]((?:\.{0,2}/)?(?:assets|data|microscope|img|images|media)/[^"'`\s<>]+)["'`]|["'`]([\w./-]+\.(?:js|mjs|css|json|png|jpe?g|webp|gif|svg|mp4|webm|md|bin|npy|txt))["'`]''')
 seen, fails = set(), []
@@ -37,14 +38,18 @@ def fetch(u):
         return u, set(), None
     except Exception as e:
         return u, set(), str(e)
-frontier = {BASE}
-with cf.ThreadPoolExecutor(24) as ex:
-    while frontier:
-        seen |= frontier
-        nxt = set()
-        for u, refs, err in ex.map(fetch, frontier):
-            if err: fails.append((u, err))
-            nxt |= refs - seen
-        print(f"fetched {len(frontier)}, total {len(seen)}, next {len(nxt)}, fails {len(fails)}", flush=True)
-        frontier = nxt
-open(os.path.join(OUT,'_fails.txt'),'w').write('\n'.join(f"{u}\t{e}" for u,e in fails))
+def run_mirror(output, base_url=BASE, workers=24):
+    global BASE, OUT, seen, fails
+    BASE, OUT = base_url, str(output)
+    seen, fails = set(), []
+    frontier = {BASE}
+    with cf.ThreadPoolExecutor(workers) as ex:
+        while frontier:
+            seen |= frontier
+            nxt = set()
+            for u, refs, err in ex.map(fetch, frontier):
+                if err: fails.append((u, err))
+                nxt |= refs - seen
+            print(f"fetched {len(frontier)}, total {len(seen)}, next {len(nxt)}, fails {len(fails)}", flush=True)
+            frontier = nxt
+        open(os.path.join(OUT,'_fails.txt'),'w').write('\n'.join(f"{u}\t{e}" for u,e in fails))

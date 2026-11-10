@@ -28,7 +28,7 @@ uv run neuron-plot-attribution \
 ## Repository map
 
 - `src/neuron_explorer/`: reusable explorer, attribution, sweep, and tool code.
-- `scripts/`: retained executable workflows and compatibility entry scripts.
+- `scripts/`: retained executable workflows; each script owns its real CLI.
 - `tests/`: package, command, and documentation checks.
 - `docs/`: user, API, research, and developer documentation.
 - `runs/`, `stats/`, `captures/`, `cache/`: generated or downloaded data.

@@ -1,18 +1,8 @@
 #!/usr/bin/env python3
-"""Thin command wrapper for ``neuron_explorer.sweep.merge_runs``."""
-
+"""Merge sharded sweep runs."""
 import argparse
-import importlib
-import sys
-
 
 def main():
-    if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
-        argparse.ArgumentParser(description=__doc__).parse_args()
-    command = importlib.import_module("neuron_explorer.sweep.merge_runs")
-    entry = getattr(command, "main", None)
-    return entry() if entry is not None else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    p=argparse.ArgumentParser(description=__doc__); p.add_argument("inputs",nargs="+"); p.add_argument("--out",required=True); a=p.parse_args()
+    from neuron_explorer.sweep.merge_runs import run_merge; run_merge(a)
+if __name__ == "__main__": main()

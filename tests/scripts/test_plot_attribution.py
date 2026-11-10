@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from neuron_explorer.attribution import cli
+
 
 ROOT = Path(__file__).parents[2]
 SCRIPT = ROOT / "scripts" / "plot_attribution.py"
@@ -152,3 +154,23 @@ def test_cache_and_dataset_catalogs_compose_in_command_order(tmp_path: Path) -> 
     assert result.returncode == 0, result.stderr
     saved = json.loads((tmp_path / "graph.json").read_text(encoding="utf-8"))
     assert saved["nodes"][1]["name"] == "cache name"
+
+
+def test_remote_graph_is_saved_before_rendering(tmp_path: Path, monkeypatch) -> None:
+    output = tmp_path / "remote.svg"
+    monkeypatch.setattr(cli, "fetch_graph", lambda **kwargs: _graph())
+
+    def fail_render(*args, **kwargs):
+        raise RuntimeError("render failed")
+
+    monkeypatch.setattr(cli, "render_svg", fail_render)
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        cli.run_plot_attribution(
+            text="remote prompt",
+            output=output,
+            no_annotations=True,
+        )
+
+    saved = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
+    assert saved["schema_version"] == 1

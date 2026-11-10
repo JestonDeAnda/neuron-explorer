@@ -5,17 +5,11 @@
 
 The merged run's meta.json is the first input's, with the shard list recorded under "shards".
 """
-import argparse
 import json
 import os
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser()
-    ap.add_argument("inputs", nargs="+")
-    ap.add_argument("--out", required=True)
-    a = ap.parse_args(argv)
-
+def run_merge(a):
     seen, n_in, n_out = set(), 0, 0
     with open(a.out, "w") as f:
         for path in a.inputs:
@@ -32,7 +26,3 @@ def main(argv=None):
     meta["shards"] = [os.path.basename(p) for p in a.inputs]
     json.dump(meta, open(a.out.replace(".jsonl", ".meta.json"), "w"), indent=1)
     print(f"{n_in} rows in, {n_out} unique -> {a.out}")
-
-
-if __name__ == "__main__":
-    main()

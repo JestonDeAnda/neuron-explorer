@@ -81,6 +81,47 @@ def test_create_app_keeps_project_state_isolated(tmp_path):
     assert second_index["layers"] == {"7": "second-run.jsonl"}
 
 
+@pytest.mark.parametrize(
+    ("host", "origin"),
+    [
+        ("localhost:9123", None),
+        ("127.0.0.1:9123", "http://127.0.0.1:9123"),
+        ("[::1]:9123", "http://[::1]:9123"),
+    ],
+)
+def test_create_app_accepts_local_hosts_on_configured_port(tmp_path, host, origin):
+    app = create_app(_paths(tmp_path), port=9123)
+    headers = {"host": host}
+    if origin:
+        headers["origin"] = origin
+
+    with TestClient(app, base_url="http://localhost:9123") as client:
+        response = client.get("/api/status", headers=headers)
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"host": "localhost:8791"},
+        {"host": "evil.example:9123"},
+        {
+            "host": "localhost:9123",
+            "origin": "https://evil.example",
+            "sec-fetch-site": "cross-site",
+        },
+    ],
+)
+def test_create_app_rejects_wrong_port_and_cross_site_hosts(tmp_path, headers):
+    app = create_app(_paths(tmp_path), port=9123)
+
+    with TestClient(app, base_url="http://localhost:9123") as client:
+        response = client.get("/api/status", headers=headers)
+
+    assert response.status_code == 403
+
+
 def test_layout_rejects_path_traversal(tmp_path):
     app = create_app(_paths(tmp_path))
 

@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
-"""Thin command wrapper for ``neuron_explorer.explorer.agent_mcp``."""
-
+"""Run the explorer stdio MCP server."""
 import argparse
-import importlib
-import sys
-
 
 def main():
-    if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
-        argparse.ArgumentParser(description=__doc__).parse_args()
-    command = importlib.import_module("neuron_explorer.explorer.agent_mcp")
-    entry = getattr(command, "main", None)
-    return entry() if entry is not None else 0
-
+    argparse.ArgumentParser(description="Explorer stdio MCP server").parse_args()
+    from neuron_explorer.explorer.agent_mcp import run_server
+    run_server()
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

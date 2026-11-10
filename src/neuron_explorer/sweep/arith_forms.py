@@ -6,7 +6,6 @@ from generic arithmetic / prompt machinery.
     uv run python scripts/arith_forms.py               # graphs cached in runs/attribution/arith/, report beside them
     uv run python scripts/arith_forms.py --redo        # rebuild the graphs
 """
-import argparse
 import html
 import json
 import os
@@ -15,15 +14,13 @@ import random
 import numpy as np
 
 from neuron_explorer.attribution import build_graph, render_svg
-from neuron_explorer.paths import ProjectPaths
 from neuron_explorer.sweep.interventions import (
     Model,
     annotate_intervention_graph,
 )
 
-PATHS = ProjectPaths.discover()
-CACHE = str(PATHS.cache)
-OUT = str(PATHS.runs / "attribution" / "arith")
+CACHE = ""
+OUT = ""
 svg = render_svg
 ZH = "零一二三四五六七八九"
 EN = "zero one two three four five six seven eight nine".split()
@@ -64,15 +61,8 @@ def overlap(p, q):
     return sum(min(p[k]["w"], q[k]["w"]) for k in p.keys() & q.keys())
 
 
-def main(argv=None):
+def run_arith_forms(a):
     global CACHE, OUT
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--k", type=int, default=1024)
-    ap.add_argument("--redo", action="store_true")
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
-    ap.add_argument("--cache-dir", default=CACHE)
-    ap.add_argument("--output-dir", default=OUT)
-    a = ap.parse_args(argv)
     CACHE, OUT = a.cache_dir, a.output_dir
     os.makedirs(OUT, exist_ok=True)
     M = Model(a.model)
@@ -340,7 +330,3 @@ def page(G, T, report, text):
     with open(path, "w") as fh:
         fh.write("\n".join(out))
     print(path)
-
-
-if __name__ == "__main__":
-    main()
