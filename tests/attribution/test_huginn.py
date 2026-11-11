@@ -301,6 +301,30 @@ def test_run_batch_keeps_dense_version_two_by_default(tmp_path):
     assert _run_versioned_batch(tmp_path, build=fail_if_built)["complete"] == 4
 
 
+def test_run_batch_rebuilds_dense_version_two_for_explicit_version_three(tmp_path):
+    _run_versioned_batch(tmp_path)
+    build_calls = 0
+
+    def build(_job):
+        nonlocal build_calls
+        build_calls += 1
+        return _graph()
+
+    _run_versioned_batch(
+        tmp_path,
+        build=build,
+        attribution_implementation_version=3,
+    )
+
+    assert build_calls == 4
+    graph = load_graph(
+        graph_paths(
+            tmp_path, "01_指代性别一致", _row()["id"], "clean_correct"
+        )[0]
+    )
+    assert graph["metadata"]["attribution_implementation_version"] == 3
+
+
 def test_run_batch_accepts_explicit_moe_version_and_identity(tmp_path):
     _run_versioned_batch(
         tmp_path,
