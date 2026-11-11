@@ -1,0 +1,19 @@
+{
+  "passed": true,
+  "pairs": 1461,
+  "tasks": 23,
+  "unique_ids": 1461,
+  "splits": {
+    "discovery": 736,
+    "evaluation": 725
+  },
+  "source_kinds": {
+    "LLM_Modularity": 501,
+    "project_generated": 960
+  },
+  "original_text_checks": 5844,
+  "original_text_mismatches": 0,
+  "canonical_ids_and_splits_preserved": true,
+  "discovery_evaluation_group_overlap": 0,
+  "model_inference_used": false
+}

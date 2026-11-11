@@ -1,0 +1,258 @@
+{
+  "schema": "cognition23-original-text-v1",
+  "tasks": [
+    {
+      "task": "Lan/anaphor_gender_agreement",
+      "label": "指代性别一致",
+      "category": "语言",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "指代性别一致",
+      "boundary": "双候选任务表现，不等同于完整认知能力",
+      "file": "按任务/01_指代性别一致.jsonl"
+    },
+    {
+      "task": "Lan/subject_verb_agreement",
+      "label": "主谓一致",
+      "category": "语言",
+      "pairs": 53,
+      "discovery": 32,
+      "evaluation": 21,
+      "measure": "主谓一致",
+      "boundary": "双候选任务表现，不等同于完整认知能力",
+      "file": "按任务/02_主谓一致.jsonl"
+    },
+    {
+      "task": "MD/add_sub_2op_symbolic",
+      "label": "二元加减",
+      "category": "形式推理",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "二元加减",
+      "boundary": "双候选任务表现，不等同于完整认知能力",
+      "file": "按任务/03_二元加减.jsonl"
+    },
+    {
+      "task": "MD/code_conditional",
+      "label": "条件代码",
+      "category": "形式推理",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "条件代码",
+      "boundary": "双候选任务表现，不等同于完整认知能力",
+      "file": "按任务/04_条件代码.jsonl"
+    },
+    {
+      "task": "phys/physics_brightness",
+      "label": "吸收与反射",
+      "category": "物理推理",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "吸收与反射",
+      "boundary": "双候选任务表现，不等同于完整认知能力",
+      "file": "按任务/05_吸收与反射.jsonl"
+    },
+    {
+      "task": "phys/physics_speed",
+      "label": "快慢判断",
+      "category": "物理推理",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "快慢判断",
+      "boundary": "双候选任务表现，不等同于完整认知能力",
+      "file": "按任务/06_快慢判断.jsonl"
+    },
+    {
+      "task": "ToM/primary_emotions",
+      "label": "基本情绪",
+      "category": "社会推理",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "基本情绪",
+      "boundary": "双候选任务表现，不等同于完整认知能力",
+      "file": "按任务/07_基本情绪.jsonl"
+    },
+    {
+      "task": "ToM/desires_goals",
+      "label": "欲望与目标",
+      "category": "社会推理",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "欲望与目标",
+      "boundary": "双候选任务表现，不等同于完整认知能力",
+      "file": "按任务/08_欲望与目标.jsonl"
+    },
+    {
+      "task": "Mem/associative_recall",
+      "label": "关联记忆检索",
+      "category": "上下文记忆",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "从上下文中检索指定实体与值的绑定。",
+      "boundary": "测上下文关联检索，不测参数中的长期知识或跨会话记忆。",
+      "file": "按任务/09_关联记忆检索.jsonl"
+    },
+    {
+      "task": "Mem/latest_update",
+      "label": "记忆更新",
+      "category": "上下文记忆",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "保留同一实体的最新状态，抑制旧状态。",
+      "boundary": "测更新与干扰抑制；同时需要时间顺序理解，不能视为纯记忆。",
+      "file": "按任务/10_记忆更新.jsonl"
+    },
+    {
+      "task": "Mem/serial_order",
+      "label": "顺序记忆",
+      "category": "上下文记忆",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "保留序列中的相邻和相对顺序。",
+      "boundary": "测上下文顺序读取，偏移增大时还涉及计算。",
+      "file": "按任务/11_顺序记忆.jsonl"
+    },
+    {
+      "task": "Learn/novel_label_induction",
+      "label": "新标签规则学习",
+      "category": "上下文学习",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "从示例学习临时标签与特征的对应，并迁移到新组合。",
+      "boundary": "测上下文适应；模型权重不更新。这里提前给出相关特征，未测自主发现相关特征。",
+      "file": "按任务/12_新标签规则学习.jsonl"
+    },
+    {
+      "task": "Learn/affine_rule_induction",
+      "label": "数值规则归纳",
+      "category": "上下文学习",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "从输入输出示例识别一次函数，并预测未见输入。",
+      "boundary": "同时依赖计算；必须与直接给出同一公式的任务比较，才能分析学习的额外贡献。",
+      "file": "按任务/13_数值规则归纳.jsonl"
+    },
+    {
+      "task": "Learn/operator_induction",
+      "label": "序列操作规则学习",
+      "category": "上下文学习",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "在给定操作集合中，从示例判断当前操作并迁移。",
+      "boundary": "测有限规则族内的归纳，不代表能学会任意新算法。",
+      "file": "按任务/14_序列操作规则学习.jsonl"
+    },
+    {
+      "task": "Create/concept_blend_selection",
+      "label": "概念组合方案选择",
+      "category": "创造相关代理",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "检查方案是否同时保留两个概念的目标功能。",
+      "boundary": "这是组合约束判断的代理任务，不测自由发明、原创性或多样性。",
+      "file": "按任务/15_概念组合方案选择.jsonl"
+    },
+    {
+      "task": "Create/alternative_use_selection",
+      "label": "物体用途迁移选择",
+      "category": "创造相关代理",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "根据新目标选择同一物体的一种适用用途。",
+      "boundary": "此例很常见，只验证目标与用途匹配。不能因答对就称为具有创造力。",
+      "file": "按任务/16_物体用途迁移选择.jsonl"
+    },
+    {
+      "task": "Create/relational_analogy",
+      "label": "跨场景结构类比",
+      "category": "创造相关代理",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "将来源场景的关系映射到目标场景。",
+      "boundary": "测类比选择，是创造活动的相关成分，也属于关系推理；不测原创类比生成。",
+      "file": "按任务/17_跨场景结构类比.jsonl"
+    },
+    {
+      "task": "Calc/carry_addition",
+      "label": "多位数进位计算",
+      "category": "计算",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "执行可精确校验的整数加法，控制进位负担。",
+      "boundary": "测具体算术计算，不代表所有数学能力。",
+      "file": "按任务/18_多位数进位计算.jsonl"
+    },
+    {
+      "task": "Calc/multistep_arithmetic",
+      "label": "多步算术执行",
+      "category": "计算",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "按顺序执行多个运算并保留中间值。",
+      "boundary": "与原二元加减不同，这里确实需要连续多步运算；也依赖工作记忆。",
+      "file": "按任务/19_多步算术执行.jsonl"
+    },
+    {
+      "task": "Calc/modular_recurrence",
+      "label": "模运算迭代",
+      "category": "计算",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "反复执行明确递推规则，观察计算深度。",
+      "boundary": "循环题与模型 loop 形式相似，不意味着每个模型循环恰好执行一次算术迭代。",
+      "file": "按任务/20_模运算迭代.jsonl"
+    },
+    {
+      "task": "Reason/deductive_chain",
+      "label": "多跳规则演绎",
+      "category": "推理",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "判断结论能否由给定事实和规则推出。",
+      "boundary": "not entailed 表示现有事实不能推出，不能解释成该结论必然为假。",
+      "file": "按任务/21_多跳规则演绎.jsonl"
+    },
+    {
+      "task": "Reason/transitive_comparison",
+      "label": "传递关系推理",
+      "category": "推理",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "组合多条比较关系，推导未直接陈述的关系。",
+      "boundary": "测关系传递，不代表一般逻辑能力；需要与顺序记忆任务比较。",
+      "file": "按任务/22_传递关系推理.jsonl"
+    },
+    {
+      "task": "Reason/causal_intervention",
+      "label": "因果干预推演",
+      "category": "推理",
+      "pairs": 64,
+      "discovery": 32,
+      "evaluation": 32,
+      "measure": "在明确结构方程中覆盖一个变量，并重算其后果。",
+      "boundary": "测给定因果模型中的推演，不测从观察数据发现真实世界因果关系。",
+      "file": "按任务/23_因果干预推演.jsonl"
+    }
+  ]
+}

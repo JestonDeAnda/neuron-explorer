@@ -1,0 +1,38 @@
+23 项认知任务原题分享包（2026-11-10）
+
+范围：实际用于现有 Huginn 23 任务实验的全部 1461 对样本。
+其中原有 8 类任务 501 对，新增 15 类任务 960 对。
+发现集 736 对、评估集 725 对；主谓一致评估集原本为 21 对，其余各 32 对。
+这是已使用样本的合集，不包含上游题库中未进入本次实验的题目。
+
+直接查看：原题汇总.csv（Excel 可打开，UTF-8 BOM），或原题阅读版.txt。
+程序读取：original_pairs.jsonl，每行一个 JSON 对象；按任务/ 提供 23 个独立文件。
+任务目录.csv / catalog.json 包含任务大类、数量、测量目标和解释边界。
+
+JSONL 字段：
+- original_clean_problem / original_corrupted_problem：来源原题干与修改后的题干。
+- clean / corrupted：加入原数据源基础提示后的文本，尚未加模型 BOS 或 Answer: 变体。
+- correct / incorrect：clean 条件的正确答案与错误选项。
+- corrupted_correct / corrupted_incorrect：corrupted 条件的正确答案与错误选项，与 clean 对调。
+- split / split_group / group_id：原实验划分及分组信息；请保留分组隔离。
+- prompt_variant：原 Huginn 实验所用提示格式名；只是元数据，不是 token 数组。
+- source_file / source_index_0based：来源文件及记录序号，序号从 0 开始。
+- source_metadata：上游模板标识，或新增任务的生成与求解信息。
+
+内容说明：题目直接提取自原始文本文件，不由 token 解码生成，不翻译或改写题目。
+英文句子片段是部分语言任务的设计，候选答案用于补全句子。
+答案开头的空格、换行和代码缩进予以保留；阅读版用引号显式显示答案空格。
+clean 不包含模型专用特殊标记，适合重新选定分词器；跨模型实验需自行固定提示与分词协议。
+base 为基础提示；answer_cue 会追加换行 Answer:；native_bos 会在 token 化后加入原生 BOS。
+原 8 类任务使用 Answer: 时，答案还会规范为单个前导空格；新增 15 类的原答案已含前导空格。
+文本来源与既有实验解码视图逐字段核对，5844 项匹配；解码视图仅用于校验。
+本包没有模型输出、归因分数、权重或 token ID 输入数组。
+
+数据来源：
+原 8 类：https://github.com/Pengrui-Han/LLM_Modularity，已固定的上游版本
+e3ac7fbb3a6caea05c88343a8de6ec04a4035db8；保留附带 LICENSE。
+新增 15 类：本项目 experiments/huginn_expanded_20261104/build_data.py 生成并筛选的合成任务。
+记忆和学习为上下文任务，创造相关任务为候选选择代理，不能代表全部认知能力。
+
+manifest.json 记录来源与包内文件的 SHA-256；VALIDATION.json 记录样本和文本校验结果。
+复建入口：experiments/huginn_relp23_20261109/export_original_text.py。
