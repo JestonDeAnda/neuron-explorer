@@ -20,6 +20,7 @@ CONDITIONS = (
     ("corrupted_correct", "corrupted", "corrupted_correct"),
     ("corrupted_incorrect", "corrupted", "corrupted_incorrect"),
 )
+ATTRIBUTION_IMPLEMENTATION_VERSION = 2
 
 _NEURON_FIELDS = (
     "virtual_depth",
@@ -30,6 +31,7 @@ _NEURON_FIELDS = (
     "shared_weight_id",
 )
 _METADATA_FIELDS = (
+    "attribution_implementation_version",
     "seed",
     "model_path",
     "model_revision",
@@ -107,8 +109,21 @@ def plan_row(row: Mapping[str, Any], task_slug: str, tokenizer: Any) -> list[Gra
     return jobs
 
 
-def json_is_complete(path: Path) -> bool:
-    """True when ``path`` is a validated Huginn graph with execution metadata."""
+def _contains_expected(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, Mapping):
+        return isinstance(actual, Mapping) and all(
+            key in actual and _contains_expected(actual[key], value)
+            for key, value in expected.items()
+        )
+    return actual == expected
+
+
+def json_is_complete(path: Path, expected: Mapping[str, Any] | None = None) -> bool:
+    """True when ``path`` is a current, validated Huginn graph.
+
+    When supplied, ``expected`` is matched recursively as a subset. This keeps
+    resume safe across tokenization, model, code, seed, and graph-config changes.
+    """
     try:
         graph = load_graph(path)
     except (OSError, ValueError, json.JSONDecodeError, UnicodeError):
@@ -128,6 +143,8 @@ def json_is_complete(path: Path) -> bool:
             return False
         if node["virtual_depth"] != node["layer"] or node["physical_neuron"] != node["n"]:
             return False
+    if expected is not None and not _contains_expected(graph, expected):
+        return False
     return True
 
 
@@ -205,6 +222,7 @@ def _attach_metadata(
     metadata = dict(saved.get("metadata") or {})
     metadata.update(
         {
+            "attribution_implementation_version": ATTRIBUTION_IMPLEMENTATION_VERSION,
             "seed": job.seed,
             "model_path": model_path,
             "model_revision": model_revision,
@@ -219,6 +237,34 @@ def _attach_metadata(
     )
     saved["metadata"] = metadata
     return saved
+
+
+def _expected_graph(
+    job: GraphJob,
+    *,
+    code_commit: str,
+    model_path: str,
+    model_revision: str,
+    recurrence_count: int,
+    graph_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "prompt_token_ids": list(job.prompt_token_ids),
+        "completion_token_ids": list(job.completion_token_ids),
+        "metadata": {
+            "attribution_implementation_version": ATTRIBUTION_IMPLEMENTATION_VERSION,
+            "seed": job.seed,
+            "model_path": model_path,
+            "model_revision": model_revision,
+            "recurrence_count": recurrence_count,
+            "prompt_protocol": job.prompt_protocol,
+            "code_commit": code_commit,
+            "graph_config": dict(graph_config),
+            "condition": job.condition,
+            "row_id": job.row_id,
+            "task_slug": job.task_slug,
+        },
+    }
 
 
 def run_batch(
@@ -278,7 +324,15 @@ def run_batch(
         for job in jobs:
             json_path, svg_path = graph_paths(root, job.task_slug, job.row_id, job.condition)
             key = (job.task_slug, job.row_id, job.condition)
-            if json_is_complete(json_path):
+            expected_graph = _expected_graph(
+                job,
+                code_commit=code_commit,
+                model_path=model_path,
+                model_revision=model_revision,
+                recurrence_count=recurrence_count,
+                graph_config=graph_config,
+            )
+            if json_is_complete(json_path, expected_graph):
                 if not _svg_ready(svg_path):
                     if len(pending) >= 2:
                         wait_one()
@@ -310,12 +364,12 @@ def run_batch(
                     recurrence_count=recurrence_count,
                     graph_config=graph_config,
                 )
-                if json_is_complete(json_path):
+                if json_is_complete(json_path, expected_graph):
                     complete += 1
                     write_progress()
                     continue
                 save_graph(graph, json_path)
-                if not json_is_complete(json_path):
+                if not json_is_complete(json_path, expected_graph):
                     raise RuntimeError(f"saved graph failed Huginn validation: {json_path}")
             except Exception as exc:  # noqa: BLE001 - one row must not abort the batch
                 failed.append({"row_id": job.row_id, "condition": job.condition, "error": str(exc)})

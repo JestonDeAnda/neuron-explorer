@@ -43,15 +43,17 @@ def encode_condition(
     """
     prompt_text = apply_prompt_text(prompt, prompt_variant)
     prompt_ids = [int(token) for token in tokenizer.encode(prompt_text, add_special_tokens=False)]
+    completion_ids = [
+        int(token)
+        for token in tokenizer.encode(completion, add_special_tokens=False)
+    ]
     native_bos = prompt_uses_native_bos(prompt_variant)
-    bos_token_id = int(tokenizer.bos_token_id) if native_bos else None
+    raw_bos_token_id = tokenizer.bos_token_id if native_bos else None
+    bos_token_id = int(raw_bos_token_id) if raw_bos_token_id is not None else None
     if native_bos:
         if bos_token_id is None:
             raise ValueError("tokenizer has no bos_token_id for native_bos")
         prompt_ids = [bos_token_id, *prompt_ids]
-    completion_ids = [
-        int(token) for token in tokenizer.encode(completion, add_special_tokens=False)
-    ]
     if not prompt_ids:
         raise ValueError("prompt tokenization is empty")
     if not completion_ids:
@@ -69,5 +71,6 @@ def encode_condition(
             "answer_cue": prompt_uses_answer_cue(prompt_variant),
             "answer_cue_text": ANSWER_CUE if prompt_uses_answer_cue(prompt_variant) else None,
             "bos_token_id": bos_token_id,
+            "tokenization": "separate_context_continuation",
         },
     }

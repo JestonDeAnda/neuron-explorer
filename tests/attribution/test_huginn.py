@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 from pathlib import Path
 
 import pytest
@@ -27,7 +29,27 @@ from neuron_explorer.attribution.huginn.schedule import (
 from neuron_explorer.attribution.huginn.seed import row_seed
 from neuron_explorer.attribution.huginn.settings import choose_edge_batch
 
-MODEL_PATH = Path("/mnt/oss-save/modelscope/tomg-group-umd/huginn-0125")
+
+def _model_path() -> Path:
+    configured = os.environ.get("HUGINN_TEST_MODEL")
+    if configured:
+        return Path(configured).expanduser()
+    mounted = Path("/mnt/oss-save/modelscope/tomg-group-umd/huginn-0125")
+    if mounted.is_dir():
+        return mounted
+    snapshots = (
+        Path.home()
+        / ".cache"
+        / "huggingface"
+        / "hub"
+        / "models--tomg-group-umd--huginn-0125"
+        / "snapshots"
+    )
+    candidates = sorted(snapshots.glob("*")) if snapshots.is_dir() else []
+    return candidates[-1] if candidates else mounted
+
+
+MODEL_PATH = _model_path()
 
 
 class _Tokenizer:
@@ -40,6 +62,20 @@ class _Tokenizer:
         assert add_special_tokens is False
         self.seen.append(text)
         return [ord(char) for char in text]
+
+
+class _BoundaryTokenizer:
+    """A BPE-like tokenizer whose continuation token differs in joint text."""
+
+    bos_token_id = 99
+
+    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
+        assert add_special_tokens is False
+        return {
+            "prompt": [1],
+            " answer": [2],
+            "prompt answer": [1, 3],
+        }[text]
 
 
 def _row() -> dict:
@@ -70,6 +106,16 @@ def test_answer_cue_appends_newline_answer_and_keeps_leading_space():
     assert encoded["prompt_protocol"]["native_bos"] is False
 
 
+def test_condition_keeps_fixed_prompt_tokens_when_joint_bpe_would_merge_boundary():
+    encoded = encode_condition(_BoundaryTokenizer(), "prompt", " answer", "base")
+
+    assert encoded["prompt_token_ids"] == [1]
+    assert encoded["completion_token_ids"] == [2]
+    assert encoded["token_ids"] == [1, 2]
+    assert encoded["completion_start"] == 1
+    assert encoded["prompt_protocol"]["tokenization"] == "separate_context_continuation"
+
+
 def test_native_bos_is_prepended_after_tokenization_without_answer_cue():
     tokenizer = _Tokenizer()
 
@@ -95,6 +141,7 @@ def test_base_variant_does_not_add_bos_or_answer_cue():
         "answer_cue": False,
         "answer_cue_text": None,
         "bos_token_id": None,
+        "tokenization": "separate_context_continuation",
     }
 
 
@@ -206,6 +253,7 @@ def _graph(token: int = 32) -> dict:
         "edges": [[0, 1, -0.2]],
         "stats": {"kept_edges": 1},
         "metadata": {
+            "attribution_implementation_version": 2,
             "seed": 7,
             "model_path": "/models/huginn-0125",
             "model_revision": "config-sha256:abc",
@@ -215,6 +263,23 @@ def _graph(token: int = 32) -> dict:
             "graph_config": {"k": 512, "max_edges": 3000, "target": "teacher_forced_completion_logprob"},
         },
     }
+
+
+def test_edge_serialization_preserves_source_target_and_signed_weight():
+    torch = pytest.importorskip("torch")
+    from neuron_explorer.attribution.huginn.graph import _serialize_edges
+
+    # Rows are targets, columns are sources: source 0 -> target 2 has weight -0.75.
+    adjacency = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [-0.75, 0.0, 0.0],
+        ]
+    )
+    edge_mask = adjacency != 0
+
+    assert _serialize_edges(adjacency, edge_mask, {0: 0, 2: 1}) == [[0, 1, -0.75]]
 
 
 def test_resume_skips_validated_json_and_regenerates_missing_svg(tmp_path: Path):
@@ -275,15 +340,32 @@ def test_resume_skips_validated_json_and_regenerates_missing_svg(tmp_path: Path)
 
 def test_resume_rebuilds_partial_json_without_clobbering_a_valid_graph(tmp_path: Path):
     valid_job_condition = "clean_correct"
+    run_kwargs = {
+        "code_commit": "deadbeef",
+        "model_path": "/models/huginn-0125",
+        "model_revision": "config-sha256:abc",
+        "recurrence_count": 32,
+        "graph_config": {
+            "k": 512,
+            "max_edges": 3000,
+            "target": "teacher_forced_completion_logprob",
+        },
+    }
+
+    run_batch(
+        [_row()],
+        "01_指代性别一致",
+        tmp_path,
+        _Tokenizer(),
+        lambda _job: _graph(token=11),
+        **run_kwargs,
+    )
     json_path, _svg_path = graph_paths(
         tmp_path, "01_指代性别一致", _row()["id"], valid_job_condition
     )
-    json_path.parent.mkdir(parents=True)
-    json_path.write_text(json.dumps(_graph(token=11)), encoding="utf-8")
     partial, _svg = graph_paths(
         tmp_path, "01_指代性别一致", _row()["id"], "clean_incorrect"
     )
-    partial.parent.mkdir(parents=True, exist_ok=True)
     partial.write_text("{", encoding="utf-8")
     built: list[str] = []
 
@@ -302,17 +384,48 @@ def test_resume_rebuilds_partial_json_without_clobbering_a_valid_graph(tmp_path:
         tmp_path,
         _Tokenizer(),
         build,
-        code_commit="deadbeef",
-        model_path="/models/huginn-0125",
-        model_revision="config-sha256:abc",
-        recurrence_count=32,
-        graph_config={"k": 512, "max_edges": 3000, "target": "teacher_forced_completion_logprob"},
+        **run_kwargs,
     )
 
     assert valid_job_condition not in built
     assert "clean_incorrect" in built
     assert json.loads(json_path.read_text(encoding="utf-8"))["token"] == 11
     assert json_is_complete(partial)
+
+
+def test_resume_rebuilds_graph_when_tokens_or_run_identity_changed(tmp_path: Path):
+    json_path, _svg_path = graph_paths(
+        tmp_path, "01_指代性别一致", _row()["id"], "clean_correct"
+    )
+    stale = _graph()
+    stale["prompt_token_ids"] = [999]
+    stale["metadata"]["code_commit"] = "old-code"
+    json_path.parent.mkdir(parents=True)
+    json_path.write_text(json.dumps(stale), encoding="utf-8")
+    built: list[str] = []
+
+    def build(job):
+        built.append(job.condition)
+        return _graph()
+
+    run_batch(
+        [_row()],
+        "01_指代性别一致",
+        tmp_path,
+        _Tokenizer(),
+        build,
+        code_commit="new-code",
+        model_path="/models/huginn-0125",
+        model_revision="config-sha256:new",
+        recurrence_count=32,
+        graph_config={"k": 512, "max_edges": 3000, "target": "teacher_forced_completion_logprob"},
+    )
+
+    assert "clean_correct" in built
+    rebuilt = json.loads(json_path.read_text(encoding="utf-8"))
+    assert rebuilt["prompt_token_ids"] != [999]
+    assert rebuilt["metadata"]["code_commit"] == "new-code"
+    assert rebuilt["metadata"]["model_revision"] == "config-sha256:new"
 
 
 def test_mount_check_counts_task_files_and_refuses_a_bad_commit(tmp_path: Path):
@@ -353,6 +466,21 @@ def test_mount_check_counts_task_files_and_refuses_a_bad_commit(tmp_path: Path):
         expected_tasks=1,
         expected_rows=2,
     )
+
+
+def test_model_revision_fingerprints_checkpoint_weights(tmp_path: Path):
+    from neuron_explorer.attribution.huginn.model import model_revision
+
+    (tmp_path / "config.json").write_text('{"model_type":"huginn"}', encoding="utf-8")
+    weight = tmp_path / "model-00001-of-00001.safetensors"
+    weight.write_bytes(b"first checkpoint")
+    first = model_revision(tmp_path)
+
+    weight.write_bytes(b"other checkpoint")
+    second = model_revision(tmp_path)
+
+    assert first.startswith("checkpoint-sha256:")
+    assert first != second
 
 
 def test_choose_edge_batch_uses_headroom_and_never_requests_a_second_model_copy():
@@ -516,12 +644,25 @@ def test_built_graph_records_execution_identity_and_full_completion():
     )
 
     assert graph["completion_token_ids"] == ids[4:]
+    assert graph["target"] == {
+        "kind": "completion_logprob",
+        "token_ids": ids[4:],
+        "prediction_positions": [3, 4, 5],
+    }
+    assert graph["prob"] == pytest.approx(
+        math.exp(graph["completion_logprob"]), rel=1e-5, abs=1e-8
+    )
     assert graph["metadata"]["seed"] == 19
     assert graph["metadata"]["code_commit"] == "abc123"
     assert graph["metadata"]["graph_config"]["k"] == 6
     assert graph["metadata"]["graph_config"]["max_edges"] == 30
     neurons = [node for node in graph["nodes"] if node["kind"] == "neuron"]
+    targets = [node for node in graph["nodes"] if node["kind"] == "logit"]
     assert neurons
+    assert len(targets) == 1
+    assert targets[0]["target_kind"] == "completion_logprob"
+    assert targets[0]["target_token_ids"] == ids[4:]
+    assert targets[0]["prediction_positions"] == [3, 4, 5]
     assert graph["edges"]
     for node in neurons:
         assert node["virtual_depth"] == node["layer"]

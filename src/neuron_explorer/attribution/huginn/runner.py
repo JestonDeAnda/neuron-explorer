@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from neuron_explorer.attribution.huginn.batch import (
+    ATTRIBUTION_IMPLEMENTATION_VERSION,
     graph_paths,
     iter_task_rows,
     json_is_complete,
@@ -48,7 +49,9 @@ def _graph_config(args, *, edge_batch: int, fidelity_note: str | None) -> dict[s
         "node_threshold": DEFAULT_NODE_THRESHOLD,
         "edge_threshold": DEFAULT_EDGE_THRESHOLD,
         "target": "teacher_forced_completion_logprob",
-        "edge_semantics": "half_rule_direct",
+        "edge_semantics": "local_linear_half_rule_direct",
+        "target_transform": "differentiated_log_softmax",
+        "output_aggregation": "sum_over_completion_tokens",
         "fidelity_reduced": fidelity_note is not None,
     }
     if fidelity_note:
@@ -229,6 +232,7 @@ def execute(args) -> int:
 
 def _sample_metadata(sample, args, revision, recurrence, *, edge_batch, fidelity_note):
     return {
+        "attribution_implementation_version": ATTRIBUTION_IMPLEMENTATION_VERSION,
         "seed": sample.seed,
         "model_path": str(args.model),
         "model_revision": revision,
@@ -256,6 +260,7 @@ def _build_job(model, job, graph_config: dict) -> dict:
         edge_threshold=float(graph_config["edge_threshold"]),
         max_edges=graph_config.get("max_edges"),
         metadata={
+            "attribution_implementation_version": ATTRIBUTION_IMPLEMENTATION_VERSION,
             "seed": job.seed,
             "graph_config": graph_config,
             "condition": job.condition,

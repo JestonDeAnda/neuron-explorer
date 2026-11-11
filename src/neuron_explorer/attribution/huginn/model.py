@@ -9,9 +9,26 @@ import torch
 
 
 def model_revision(model_path: Path) -> str:
-    """Short identity of the checkpoint config. Weights stay at ``model_path``."""
-    digest = hashlib.sha256((Path(model_path) / "config.json").read_bytes()).hexdigest()
-    return f"config-sha256:{digest[:16]}"
+    """Content fingerprint of model config, remote code, and checkpoint weights."""
+    root = Path(model_path)
+    weights = sorted(
+        {
+            *root.glob("*.safetensors"),
+            *root.glob("pytorch_model*.bin"),
+        }
+    )
+    if not weights:
+        raise FileNotFoundError(f"no checkpoint weight files found in {root}")
+    files = sorted({root / "config.json", *root.glob("*.py"), *weights})
+    digest = hashlib.sha256()
+    for path in files:
+        relative = path.relative_to(root).as_posix().encode()
+        digest.update(len(relative).to_bytes(4, "big"))
+        digest.update(relative)
+        with path.open("rb") as handle:
+            while chunk := handle.read(8 * 1024 * 1024):
+                digest.update(chunk)
+    return f"checkpoint-sha256:{digest.hexdigest()[:24]}"
 
 
 def _repair_tied_weights(model_cls) -> None:

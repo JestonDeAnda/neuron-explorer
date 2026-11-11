@@ -18,6 +18,15 @@ def _escape(value: object) -> str:
     return html.escape(cleaned)
 
 
+def _target_label(graph: Mapping[str, Any]) -> str:
+    target = graph.get("target", graph["token"])
+    if isinstance(target, Mapping) and target.get("kind") == "completion_logprob":
+        token_ids = target.get("token_ids")
+        count = len(token_ids) if isinstance(token_ids, Sequence) else 0
+        return f"completion log-prob ({count} tokens)"
+    return repr(target)
+
+
 def _tokens(graph: Mapping[str, Any]) -> list[str]:
     tokens = graph.get("tokens")
     if isinstance(tokens, Sequence) and not isinstance(tokens, (str, bytes)):
@@ -150,16 +159,23 @@ def render_svg(
         )
 
     stats = graph["stats"]
-    target = _escape(repr(graph.get("target", graph["token"])))
+    target = _escape(_target_label(graph))
+    aggregate_target = isinstance(graph.get("target"), Mapping)
+    probability = (
+        f"log p={float(graph['completion_logprob']):.3f} · p={float(graph['prob']):.2e}"
+        if aggregate_target and "completion_logprob" in graph
+        else f"p={float(graph['prob']):.2f}"
+    )
     output.append(
         f'<text x="{PAD_L}" y="24" font-size="15" font-weight="600">'
-        f'→ {target}  p={graph["prob"]:.2f}</text>'
+        f"→ {target}  {_escape(probability)}</text>"
     )
     output.append(
         f'<text x="{PAD_L}" y="44" fill="#555">'
         f'{stats.get("kept_neurons", 0)} neurons from '
         f'{stats.get("candidates", 0)} candidates · candidates explain '
-        f'{stats.get("logit_from_candidates", 0):.0%} of the logit directly · '
+        f'{stats.get("logit_from_candidates", 0):.0%} of the '
+        f'{"target locally" if aggregate_target else "logit directly"} · '
         f'top {len(shown)} of {stats.get("kept_edges", len(graph["edges"]))} '
         "edges shown</text>"
     )
@@ -392,6 +408,8 @@ def _node_tooltip(
     graph: Mapping[str, Any], node: Mapping[str, Any], tokens: Sequence[str]
 ) -> str:
     if node["kind"] == "logit":
+        if node.get("target_kind") == "completion_logprob":
+            return "target scalar: summed completion log-probability"
         return "target logit"
     head = (
         f"{_node_name(graph, node, tokens)}  "

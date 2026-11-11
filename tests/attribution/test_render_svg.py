@@ -77,3 +77,27 @@ def test_neuron_tooltip_contains_layer_neuron_and_position_identifier():
     rendered = render_svg(graph_fixture())
 
     assert "<title>L1 N7@0" in rendered
+
+
+def test_completion_logprob_target_is_not_mislabeled_as_one_logit():
+    graph = deepcopy(graph_fixture())
+    graph["target"] = {
+        "kind": "completion_logprob",
+        "token_ids": [41, 42],
+        "prediction_positions": [0, 1],
+    }
+    graph["completion_logprob"] = -2.5
+    graph["nodes"][-1].update(
+        {
+            "target_kind": "completion_logprob",
+            "target_token_ids": [41, 42],
+            "prediction_positions": [0, 1],
+        }
+    )
+
+    rendered = render_svg(graph)
+
+    assert "completion log-prob (2 tokens)" in rendered
+    assert "log p=" in rendered
+    assert "target scalar" in rendered
+    assert "target logit" not in rendered

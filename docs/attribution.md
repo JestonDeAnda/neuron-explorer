@@ -80,7 +80,12 @@ neuron, and a `shared_weight_id` that is stable across recurrence. The attribute
 scalar is the teacher-forced sum of completion-token log-probabilities. Prompt
 text follows `prompt_variant`: `answer_cue` appends a newline and `Answer:`,
 and `native_bos` prepends the tokenizer BOS after tokenization. Completion
-strings, including leading spaces, are encoded unchanged. A row id fixes one
+strings, including leading spaces, are encoded unchanged. Prompt and completion
+are deliberately tokenized separately: this computes generation probability
+conditioned on the fixed prompt tokens. Joint BPE tokenization can merge the
+last prompt token with a completion that has no leading space (for example
+`:` + `false`), which would change the conditioning context. The saved
+`prompt_protocol.tokenization` records this choice. A row id fixes one
 recurrent-state seed for all four conditions.
 
 ```bash
@@ -96,8 +101,30 @@ Default fidelity is `--k 512` and `--max-edges 3000`. Graphs land in
 `output/{json,svg}/<task-slug>/<sample-id>__<condition>.{json,svg}` with
 `output/manifest.jsonl`, `output/progress.json`, and `output/summary.json`.
 Validated JSON is skipped on resume; a missing SVG is redrawn from that JSON.
+Resume matching is strict: implementation version, prompt/completion token IDs,
+row seed, model identity, code commit, recurrence count, prompt protocol, and
+graph configuration must all match. A stale or partial JSON is recomputed.
+Model identity is a content SHA-256 over `config.json`, checkpoint-side Python
+code, and every safetensors/PyTorch weight shard; computing it reads the full
+checkpoint once at process startup.
 `scripts/huginn_mount_check.py` checks the dataset, checkpoint, staged commit,
 and, with `--mounts`, the four DLC storage mounts before any GPU work.
+
+Huginn completion graphs have one aggregate output pseudo-node rather than one
+next-token logit. Top-level `target.kind` is `completion_logprob`; it includes
+all completion token IDs and prediction positions. `completion_logprob` is the
+summed scalar and `prob`/`stats.sequence_probability` are its exponentiated
+sequence probability. The output node repeats this target metadata. Edges still
+use `[source, destination, signed_weight]`, while the internal matrix is stored
+as target rows and source columns.
+
+These weights are a local activation-times-gradient linearization. RMS
+denominators and attention patterns are frozen, MLP products use the half rule,
+and log-softmax remains differentiated. The `other` residual therefore contains
+the local intercept plus omitted state and non-candidate effects; the graph is
+not an exact additive decomposition of the nonlinear log-probability value.
+Run metadata records `edge_semantics=local_linear_half_rule_direct` and
+`target_transform=differentiated_log_softmax`.
 
 ## Raw graph computation API
 
@@ -245,16 +272,21 @@ on load. Required top-level fields are:
 - `edges`: `[source_index, destination_index, weight]` arrays.
 - `stats`: computation/pruning summary object.
 
-Saved annotated graphs commonly add `tokens` (decoded prompt-token strings)
-and `target` (decoded target), and studies may add `title`, `group`, `edits`,
-`watch`, or `top`.
+Saved annotated single-token graphs commonly add `tokens` (decoded
+prompt-token strings) and `target` (decoded target). Huginn completion graphs
+instead use a structured `target` object with `kind`, `token_ids`, and
+`prediction_positions`, plus `prompt_token_ids`, `completion_token_ids`, and
+`completion_logprob`. Studies may add `title`, `group`, `edits`, `watch`, or
+`top`.
 
 Every node requires `kind`, `layer`, `pos`, `n`, `act`, and `influence`.
 `kind` is one of:
 
 - `embed`: `layer=-1`, `n=0`, activation normally null.
 - `neuron`: model layer and neuron indices, activation and path influence.
-- `logit`: final pseudo-layer, target token ID in `n`, influence `1.0`.
+- `logit`: final pseudo-layer, target token ID in `n`, influence `1.0`. For an
+  aggregate Huginn completion target, `n=-1` and the node has `target_kind`,
+  `target_token_ids`, and `prediction_positions`.
 
 Builder-produced neuron nodes may also include `gate`, `other`, and
 `clamped`. Annotation adds `tok`, `name`, `lens`, and `annotation`. Edge

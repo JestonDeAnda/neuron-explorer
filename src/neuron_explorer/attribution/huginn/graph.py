@@ -28,6 +28,20 @@ def _influence(matrix: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return total
 
 
+def _serialize_edges(
+    adjacency: torch.Tensor,
+    edge_mask: torch.Tensor,
+    remap: Mapping[int, int],
+) -> list[list[int | float]]:
+    """Serialize a target-row/source-column matrix as source→target edges."""
+    targets, sources = edge_mask.nonzero(as_tuple=True)
+    return [
+        [remap[int(source)], remap[int(target)], round(float(adjacency[target, source]), 5)]
+        for target, source in zip(targets.tolist(), sources.tolist())
+        if int(source) in remap and int(target) in remap
+    ]
+
+
 def build_huginn_graph(
     model,
     token_ids: Sequence[int],
@@ -220,19 +234,17 @@ def _build(
                 {
                     "kind": "logit",
                     "layer": len(linearized.slots),
-                    "pos": length - 2,
-                    "n": ids[-1],
+                    "pos": completion_start,
+                    "n": -1,
                     "act": round(float(logprob), 6),
                     "influence": 1.0,
                     "other": round(float(other[index]), 4),
+                    "target_kind": "completion_logprob",
+                    "target_token_ids": ids[completion_start:],
+                    "prediction_positions": list(range(completion_start - 1, length - 1)),
                 }
             )
-    sources, destinations = edge_mask.nonzero(as_tuple=True)
-    edges = [
-        [remap[int(source)], remap[int(destination)], round(float(adjacency[destination, source]), 5)]
-        for source, destination in zip(sources.tolist(), destinations.tolist())
-        if int(source) in remap and int(destination) in remap
-    ]
+    edges = _serialize_edges(adjacency, edge_mask, remap)
     graph_config = dict(metadata.get("graph_config") or {})
     graph_config.setdefault("k", k)
     graph_config["effective_k"] = k
@@ -241,14 +253,22 @@ def _build(
     graph_config.setdefault("node_threshold", node_threshold)
     graph_config.setdefault("edge_threshold", edge_threshold)
     graph_config.setdefault("target", "teacher_forced_completion_logprob")
-    graph_config.setdefault("edge_semantics", "half_rule_direct")
+    graph_config.setdefault("edge_semantics", "local_linear_half_rule_direct")
+    graph_config.setdefault("target_transform", "differentiated_log_softmax")
+    graph_config.setdefault("output_aggregation", "sum_over_completion_tokens")
     metadata = dict(metadata)
     metadata["graph_config"] = graph_config
     metadata["seed"] = seed
     first = float(token_logprobs[0])
+    sequence_probability = float(torch.exp(logprob))
     return {
         "token": ids[completion_start],
-        "prob": round(float(torch.exp(token_logprobs[0])), 6),
+        "prob": round(sequence_probability, 10),
+        "target": {
+            "kind": "completion_logprob",
+            "token_ids": ids[completion_start:],
+            "prediction_positions": list(range(completion_start - 1, length - 1)),
+        },
         "completion_token_ids": ids[completion_start:],
         "prompt_token_ids": ids[:completion_start],
         "completion_logprob": round(float(logprob), 6),
@@ -262,6 +282,8 @@ def _build(
             "completion_tokens": length - completion_start,
             "completion_logprob": round(float(logprob), 6),
             "first_token_logprob": round(first, 6),
+            "first_token_probability": round(float(torch.exp(token_logprobs[0])), 10),
+            "sequence_probability": round(sequence_probability, 10),
             "token_logprobs": [round(float(item), 6) for item in token_logprobs],
             "logit_from_candidates": (
                 round(float(adjacency[k + length].sum()) / logit_value, 4) if logit_value else None
