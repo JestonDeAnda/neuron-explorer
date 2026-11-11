@@ -81,16 +81,49 @@ half-rule. It is not used to load or attribute the real checkpoint.
 The adapter must fail closed if an expected xLLM class, parameter shape,
 execution count, routing invariant, or source commit differs.
 
-## Package Boundaries
+## General MoE Boundary
 
-Create `src/neuron_explorer/attribution/moe_huginn/`:
+The reusable part of MoE attribution is not model loading or module patching.
+Those details differ between xLLM, Mixtral-style Transformers, DeepSeek MoE,
+expert-parallel runtimes, and recurrent models. The reusable boundary is the
+data contract between a runtime-specific linearization backend and graph
+construction.
+
+Create `src/neuron_explorer/attribution/moe/`:
+
+- `types.py`: immutable `MoEExecutionSlot`, `RoutedNeuron`, `RoutingSnapshot`,
+  `MoEContributions`, and `MoEModelIdentity` records.
+- `backend.py`: a `MoELinearizationBackend` protocol exposing schedule,
+  routed leaves, total/direct contributions, replay, completion target, and
+  runtime identity without importing xLLM.
+- `graph.py`: backend-independent candidate ranking, direct edges, influence
+  pruning, expert-neuron serialization, and schema invariants.
+- `reference.py`: dependency-free tiny PyTorch backends used to prove the
+  generic graph layer does not assume top-2 sigmoid routing. Tests include one
+  top-2 sigmoid backend and one softmax backend with a different expert count
+  and top-k value.
+
+The protocol explicitly parameterizes:
+
+- router activation and normalization labels;
+- selected expert count, which may differ by token or layer;
+- shared experts versus routed experts;
+- expert-local width and global serialized neuron identity;
+- physical layer, virtual execution, recurrence iteration, and parameter
+  sharing;
+- runtime-specific source leaves and auxiliary metadata;
+- single-device versus expert-parallel capability declarations.
+
+The generic layer never assumes xLLM tensor names, 25 experts, top-2 routing,
+sigmoid scores, grouped GEMM, recurrence, or FlashAttention.
+
+Create `src/neuron_explorer/attribution/moe/xllm_huginn/`:
 
 - `schedule.py`: 112 virtual execution slots and expert shared-weight IDs.
-- `reference.py`: dependency-free tiny PyTorch equations for CPU tests.
 - `runtime.py`: pinned xLLM source/runtime checks and strict native loading.
 - `linearized.py`: in-place patches, replay cache, frozen patterns/routes,
-  expert leaves, contributions, and completion targets.
-- `graph.py`: candidate ranking, direct edges, pruning, node serialization.
+  expert leaves, contributions, and completion targets; implements
+  `MoELinearizationBackend`.
 - `runner.py`: benchmark, resumable 23-task batch, progress, and launch status.
 - `mount.py`: checkpoint, source, extension, dataset, and mount validation.
 
@@ -101,8 +134,30 @@ Add:
 - `tests/attribution/test_moe_huginn.py`
 
 The existing Huginn batch planner and four-condition protocol are reused. Its
-resume helper will accept an explicit implementation version so dense
-Huginn-0125 remains version 2 while MoE graphs use version 3.
+resume helper will accept an explicit implementation version whose default is
+the existing dense version 2, so unchanged callers serialize byte-compatible
+metadata while MoE graphs explicitly request version 3.
+
+This release implements one production backend, xLLM Huginn. Adding another
+real MoE family is outside this run; the two tiny reference backends are the
+portability proof for the generic contract.
+
+## Dense Huginn Compatibility
+
+The validated Huginn-0125 adapter is a protected compatibility surface:
+
+- do not move, rewrite, or make it implement the new MoE protocol;
+- do not change its default implementation version, graph configuration,
+  node fields, checkpoint fingerprint, tokenizer protocol, schedule, renderer
+  behavior, or CLI;
+- shared batch helpers may gain keyword-only parameters only when all existing
+  calls retain their old defaults;
+- the complete existing Huginn test suite must pass before every MoE task is
+  accepted;
+- add explicit regression tests that a dense graph still records version 2,
+  resumes with the old metadata contract, and rejects version-3 expectations;
+- a real local Raven tiny-model forward/linearization test remains enabled and
+  cannot be replaced by a mock.
 
 ## Node and Metadata Schema
 
