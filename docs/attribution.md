@@ -70,6 +70,35 @@ on stdout and the process exits nonzero on a failed exactness check. It writes
 no cache. Hugging Face weights are reused, but each validation run recomputes
 all checks.
 
+## Huginn-0125 attribution
+
+Raven is not a Qwen3.5 model. `scripts/run_huginn_attribution.py` uses a separate
+adapter that unrolls Huginn's 2 prelude blocks, 4 shared recurrent blocks
+repeated 32 times, and 2 coda blocks as virtual depth 0..131. Each neuron keeps
+that virtual depth, its stage, recurrence iteration, physical layer, physical
+neuron, and a `shared_weight_id` that is stable across recurrence. The attributed
+scalar is the teacher-forced sum of completion-token log-probabilities. Prompt
+text follows `prompt_variant`: `answer_cue` appends a newline and `Answer:`,
+and `native_bos` prepends the tokenizer BOS after tokenization. Completion
+strings, including leading spaces, are encoded unchanged. A row id fixes one
+recurrent-state seed for all four conditions.
+
+```bash
+uv run python scripts/run_huginn_attribution.py \
+  --model /path/to/huginn-0125 \
+  --dataset /path/to/按任务 \
+  --output-root /path/to/attribution/huginn-0125 \
+  --commit "$(git rev-parse HEAD)" \
+  --benchmark-first
+```
+
+Default fidelity is `--k 512` and `--max-edges 3000`. Graphs land in
+`output/{json,svg}/<task-slug>/<sample-id>__<condition>.{json,svg}` with
+`output/manifest.jsonl`, `output/progress.json`, and `output/summary.json`.
+Validated JSON is skipped on resume; a missing SVG is redrawn from that JSON.
+`scripts/huginn_mount_check.py` checks the dataset, checkpoint, staged commit,
+and, with `--mounts`, the four DLC storage mounts before any GPU work.
+
 ## Raw graph computation API
 
 `build_graph` is Torch- and Transformers-backed and is lazily imported:

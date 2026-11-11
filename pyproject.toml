@@ -32,6 +32,7 @@ dev = [
 packages = [
     "neuron_explorer",
     "neuron_explorer.attribution",
+    "neuron_explorer.attribution.huginn",
     "neuron_explorer.explorer",
     "neuron_explorer.sweep",
     "neuron_explorer.tools",
