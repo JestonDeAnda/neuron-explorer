@@ -28,6 +28,7 @@ from neuron_explorer.attribution.huginn.schedule import (
 )
 from neuron_explorer.attribution.huginn.seed import row_seed
 from neuron_explorer.attribution.huginn.settings import choose_edge_batch
+from neuron_explorer.attribution.schema import load_graph
 
 
 def _model_path() -> Path:
@@ -263,6 +264,77 @@ def _graph(token: int = 32) -> dict:
             "graph_config": {"k": 512, "max_edges": 3000, "target": "teacher_forced_completion_logprob"},
         },
     }
+
+
+def _run_versioned_batch(tmp_path, build=lambda _job: _graph(), **version_options):
+    return run_batch(
+        [_row()],
+        "01_指代性别一致",
+        tmp_path,
+        _Tokenizer(),
+        build,
+        code_commit="deadbeef",
+        model_path="/models/huginn-0125",
+        model_revision="checkpoint-sha256:abc",
+        recurrence_count=32,
+        graph_config={
+            "k": 512,
+            "max_edges": 3000,
+            "target": "teacher_forced_completion_logprob",
+        },
+        **version_options,
+    )
+
+
+def test_run_batch_keeps_dense_version_two_by_default(tmp_path):
+    _run_versioned_batch(tmp_path)
+    graph = load_graph(
+        graph_paths(
+            tmp_path, "01_指代性别一致", _row()["id"], "clean_correct"
+        )[0]
+    )
+    assert graph["metadata"]["attribution_implementation_version"] == 2
+
+    def fail_if_built(_job):
+        raise AssertionError("unchanged dense graph must resume")
+
+    assert _run_versioned_batch(tmp_path, build=fail_if_built)["complete"] == 4
+
+
+def test_run_batch_accepts_explicit_moe_version_and_identity(tmp_path):
+    _run_versioned_batch(
+        tmp_path,
+        attribution_implementation_version=3,
+        extra_metadata={"runtime": "xllm", "source_commit": "755c7b3"},
+    )
+    graph = load_graph(
+        graph_paths(
+            tmp_path, "01_指代性别一致", _row()["id"], "clean_correct"
+        )[0]
+    )
+    assert graph["metadata"]["attribution_implementation_version"] == 3
+    assert graph["metadata"]["runtime"] == "xllm"
+    assert graph["metadata"]["source_commit"] == "755c7b3"
+
+    rebuilt: list[str] = []
+    _run_versioned_batch(
+        tmp_path,
+        build=lambda job: rebuilt.append(job.condition) or _graph(),
+        attribution_implementation_version=3,
+        extra_metadata={"runtime": "xllm", "source_commit": "new-source"},
+    )
+    assert rebuilt == [name for name, _prompt, _answer in CONDITIONS]
+
+
+def test_run_batch_rejects_extra_metadata_overriding_reserved_fields(tmp_path):
+    with pytest.raises(
+        ValueError,
+        match=r"extra metadata overrides reserved fields: \['model_path', 'seed'\]",
+    ):
+        _run_versioned_batch(
+            tmp_path,
+            extra_metadata={"seed": 1, "model_path": "/other/model"},
+        )
 
 
 def test_edge_serialization_preserves_source_target_and_signed_weight():

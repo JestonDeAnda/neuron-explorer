@@ -215,6 +215,8 @@ def _attach_metadata(
     model_revision: str,
     recurrence_count: int,
     graph_config: Mapping[str, Any],
+    attribution_implementation_version: int = 2,
+    extra_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     saved = dict(graph)
     saved["completion_token_ids"] = list(job.completion_token_ids)
@@ -222,7 +224,7 @@ def _attach_metadata(
     metadata = dict(saved.get("metadata") or {})
     metadata.update(
         {
-            "attribution_implementation_version": ATTRIBUTION_IMPLEMENTATION_VERSION,
+            "attribution_implementation_version": attribution_implementation_version,
             "seed": job.seed,
             "model_path": model_path,
             "model_revision": model_revision,
@@ -235,6 +237,7 @@ def _attach_metadata(
             "task_slug": job.task_slug,
         }
     )
+    metadata.update(extra_metadata or {})
     saved["metadata"] = metadata
     return saved
 
@@ -247,23 +250,27 @@ def _expected_graph(
     model_revision: str,
     recurrence_count: int,
     graph_config: Mapping[str, Any],
+    attribution_implementation_version: int = 2,
+    extra_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    metadata = {
+        "attribution_implementation_version": attribution_implementation_version,
+        "seed": job.seed,
+        "model_path": model_path,
+        "model_revision": model_revision,
+        "recurrence_count": recurrence_count,
+        "prompt_protocol": job.prompt_protocol,
+        "code_commit": code_commit,
+        "graph_config": dict(graph_config),
+        "condition": job.condition,
+        "row_id": job.row_id,
+        "task_slug": job.task_slug,
+    }
+    metadata.update(extra_metadata or {})
     return {
         "prompt_token_ids": list(job.prompt_token_ids),
         "completion_token_ids": list(job.completion_token_ids),
-        "metadata": {
-            "attribution_implementation_version": ATTRIBUTION_IMPLEMENTATION_VERSION,
-            "seed": job.seed,
-            "model_path": model_path,
-            "model_revision": model_revision,
-            "recurrence_count": recurrence_count,
-            "prompt_protocol": job.prompt_protocol,
-            "code_commit": code_commit,
-            "graph_config": dict(graph_config),
-            "condition": job.condition,
-            "row_id": job.row_id,
-            "task_slug": job.task_slug,
-        },
+        "metadata": metadata,
     }
 
 
@@ -281,8 +288,26 @@ def run_batch(
     graph_config: Mapping[str, Any],
     render: Callable[[Mapping[str, Any]], str] | None = None,
     order: str = "given",
+    attribution_implementation_version: int = 2,
+    extra_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build missing graphs. Valid JSON is never replaced; missing SVG is redrawn."""
+    reserved = {
+        "attribution_implementation_version",
+        "seed",
+        "model_path",
+        "model_revision",
+        "recurrence_count",
+        "prompt_protocol",
+        "code_commit",
+        "graph_config",
+        "condition",
+        "row_id",
+        "task_slug",
+    }
+    overlap = reserved.intersection(extra_metadata or {})
+    if overlap:
+        raise ValueError(f"extra metadata overrides reserved fields: {sorted(overlap)}")
     if render is None:
         from neuron_explorer.attribution.render_svg import render_svg
 
@@ -331,6 +356,8 @@ def run_batch(
                 model_revision=model_revision,
                 recurrence_count=recurrence_count,
                 graph_config=graph_config,
+                attribution_implementation_version=attribution_implementation_version,
+                extra_metadata=extra_metadata,
             )
             if json_is_complete(json_path, expected_graph):
                 if not _svg_ready(svg_path):
@@ -363,6 +390,8 @@ def run_batch(
                     model_revision=model_revision,
                     recurrence_count=recurrence_count,
                     graph_config=graph_config,
+                    attribution_implementation_version=attribution_implementation_version,
+                    extra_metadata=extra_metadata,
                 )
                 if json_is_complete(json_path, expected_graph):
                     complete += 1
