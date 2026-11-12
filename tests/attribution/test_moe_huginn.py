@@ -13,8 +13,19 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.nn.functional as F
 from safetensors.torch import save_file
+from torch import nn
 
+from neuron_explorer.attribution.moe import (
+    MoELinearizationBackend,
+    MoESourceLeaf,
+    build_moe_graph,
+)
+from neuron_explorer.attribution.moe.xllm_huginn.linearized import (
+    XLLMHuginnLinearized,
+    _attention_forward,
+)
 from neuron_explorer.attribution.moe.xllm_huginn.mount import check_moe_mounts
 from neuron_explorer.attribution.moe.xllm_huginn.runtime import (
     XLLM_SOURCE_COMMIT,
@@ -984,6 +995,798 @@ def test_importing_package_does_not_import_xllm() -> None:
                 "for name in sys.modules)"
             ),
         ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+# Tiny modules with the public names and attributes of the pinned xLLM classes.
+# The linearized backend discovers these classes from the model object and looks
+# up ``apply_rotary_embeddings`` and ``mgmm`` in each class's defining module.
+
+
+def apply_rotary_embeddings(xq, xk, freqs_cis, backward):
+    if backward:
+        freqs_cis = freqs_cis.conj()
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    freqs_cis = freqs_cis.unsqueeze(1)
+    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
+    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
+
+def mgmm(x, weight, group_sizes, transpose, backend):
+    del backend
+    chunks = torch.split(x, [int(size) for size in group_sizes])
+    return torch.cat(
+        [
+            chunk @ (expert.transpose(0, 1) if transpose else expert)
+            for chunk, expert in zip(chunks, weight, strict=True)
+        ]
+    )
+
+
+def _repeat_heads(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    batch, length, heads, dim = x.shape
+    return x.unsqueeze(3).expand(batch, length, heads, n_rep, dim).reshape(
+        batch, length, heads * n_rep, dim
+    )
+
+
+class GroupRMSNorm(nn.Module):
+    def __init__(self, num_features: int, num_groups: int = 1, eps: float = 1e-6):
+        super().__init__()
+        self.num_features = num_features
+        self.num_groups = num_groups
+        self.groups_per_partition = num_groups
+        self.gather_input = False
+        self.eps = eps
+        self.elementwise_affine = True
+        self.weight = nn.Parameter(0.2 * torch.randn(num_features))
+
+    def forward(self, x):
+        features = x.float().reshape(*x.shape[:-1], self.groups_per_partition, -1)
+        rstd = torch.rsqrt(features.pow(2).mean(-1, keepdim=True) + self.eps)
+        return (features * rstd).reshape(x.shape).to(x.dtype) * (self.weight + 1)
+
+
+class CausalSoftmaxAttention(nn.Module):
+    def __init__(self, n_heads: int, n_kv_heads: int, head_dim: int):
+        super().__init__()
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.head_dim = head_dim
+        self.rope_head_dim = head_dim
+        self.dropout = 0.0
+        self.backend = "flash"
+        self.scale = 1.0 / head_dim**0.5
+
+    def forward(
+        self, xq, xk, xv, g, freqs_cis, segments,
+        fp32_attn_output=False, deterministic=True, cache=None,
+    ):
+        del g, segments, fp32_attn_output, deterministic, cache
+        batch, length, _ = xq.shape
+        xq = xq.reshape(batch, length, self.n_heads, self.head_dim)
+        xk = xk.reshape(batch, length, self.n_kv_heads, self.head_dim)
+        xv = xv.reshape(batch, length, self.n_kv_heads, self.head_dim)
+        xq, xk = apply_rotary_embeddings(xq, xk, freqs_cis=freqs_cis, backward=False)
+        n_rep = self.n_heads // self.n_kv_heads
+        xk = _repeat_heads(xk, n_rep).permute(0, 2, 3, 1)
+        xv = _repeat_heads(xv, n_rep).transpose(1, 2)
+        xq = xq.transpose(1, 2)
+        mask = torch.full((batch, length, length), float("-inf")).triu(1).type_as(xq)
+        scores = torch.matmul(xq, xk) * self.scale + mask.unsqueeze(1)
+        scores = F.softmax(scores, dim=-1, dtype=torch.float32).to(xq)
+        output = torch.matmul(scores, xv).transpose(1, 2)
+        return output.reshape(batch, length, -1), None
+
+
+class MultiheadAttention(nn.Module):
+    def __init__(self, dim: int, n_heads: int, n_kv_heads: int, head_dim: int):
+        super().__init__()
+        self.norm = GroupRMSNorm(dim)
+        self.wq = nn.Linear(dim, n_heads * head_dim, bias=False)
+        self.wk = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
+        self.wv = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
+        self.causal_attention = CausalSoftmaxAttention(n_heads, n_kv_heads, head_dim)
+        self.wo = nn.Linear(n_heads * head_dim, dim, bias=False)
+
+    def forward(
+        self, x, freqs_cis, segments=None, fp32_attn_output=False,
+        deterministic=True, cache=None,
+    ):
+        hidden = self.norm(x)
+        attention, new_cache = self.causal_attention(
+            self.wq(hidden), self.wk(hidden), self.wv(hidden), None, freqs_cis,
+            segments, fp32_attn_output, deterministic, cache,
+        )
+        return x + self.wo(attention), new_cache
+
+
+class TopKRouter(nn.Module):
+    def __init__(self, dim: int, num_experts: int, topk: int):
+        super().__init__()
+        self.num_experts = num_experts
+        self.topk = topk
+        self.score_func = "sigmoid"
+        self.scaling_factor = None
+        self.weight = nn.Parameter(torch.randn(num_experts, dim))
+        self.register_buffer("bias", None)
+        self.native_calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    def forward(self, x, load_balancing_type=None):
+        del load_balancing_type
+        scores = torch.sigmoid(F.linear(x, self.weight).float())
+        indices = torch.topk(scores, self.topk, dim=-1)[1]
+        selected = torch.gather(scores, -1, indices)
+        selected = selected / selected.sum(-1, keepdim=True)
+        self.native_calls.append((indices.detach().clone(), selected.detach().clone()))
+        tokens_per_expert = torch.bincount(indices.flatten(), minlength=self.num_experts)
+        return selected.to(x), indices, tokens_per_expert, None
+
+
+class Expert(nn.Module):
+    def __init__(self, dim: int, inter_dim: int, num_experts: int):
+        super().__init__()
+        self.model_dim = dim
+        self.inter_dim = inter_dim
+        self.n_experts = num_experts
+        self.n_local_experts = num_experts
+        self.backend = "torch"
+        self.hidden_dropout = 0.0
+        self.weight1 = nn.Parameter(0.6 * torch.randn(num_experts * inter_dim, dim))
+        self.weight2 = nn.Parameter(0.6 * torch.randn(num_experts * dim, inter_dim))
+        self.weight3 = nn.Parameter(0.6 * torch.randn(num_experts * inter_dim, dim))
+
+    def forward(self, x, group_sizes):
+        w1 = self.weight1.reshape(self.n_local_experts, self.inter_dim, self.model_dim)
+        w2 = self.weight2.reshape(self.n_local_experts, self.model_dim, self.inter_dim)
+        w3 = self.weight3.reshape(self.n_local_experts, self.inter_dim, self.model_dim)
+        h1 = F.silu(mgmm(x, w1, group_sizes, True, self.backend))
+        h3 = mgmm(x, w3, group_sizes, True, self.backend)
+        return mgmm(h1 * h3, w2, group_sizes, True, self.backend)
+
+
+class NormalizedMoE(nn.Module):
+    def __init__(self, dim: int, inter_dim: int, num_experts: int, topk: int):
+        super().__init__()
+        self.n_experts = num_experts
+        self.n_local_experts = num_experts
+        self.inter_dim = inter_dim
+        self.topk = topk
+        self.n_shared_experts = 0
+        self.norm = GroupRMSNorm(dim)
+        self.router = TopKRouter(dim, num_experts, topk)
+        self.experts = Expert(dim, inter_dim, num_experts)
+        self.fc1 = None
+        self.fc2 = None
+        self.fc3 = None
+
+    def forward(self, x, load_balancing_type=None):
+        batch, length, _ = x.shape
+        hidden = self.norm(x)
+        scores, indices, tokens_per_expert, aux = self.router(hidden, load_balancing_type)
+        flat = hidden.reshape(batch * length, -1)
+        sorted_indices = torch.argsort(indices.flatten(), stable=True)
+        permute_indices = sorted_indices // self.topk
+        routed = self.experts(
+            torch.index_select(flat, 0, permute_indices), tokens_per_expert.tolist()
+        )
+        weights = scores.flatten()[sorted_indices].unsqueeze(-1)
+        combined = torch.zeros_like(flat).index_add(0, permute_indices, routed * weights)
+        return x + combined.reshape(batch, length, -1), aux
+
+
+class TransformerMoEBlock(nn.Module):
+    def __init__(self, layer_id: int, **sizes: int):
+        super().__init__()
+        self.layer_id = layer_id
+        self.attention = MultiheadAttention(
+            sizes["dim"], sizes["n_heads"], sizes["n_kv_heads"], sizes["head_dim"]
+        )
+        self.moe = NormalizedMoE(
+            sizes["dim"], sizes["inter_dim"], sizes["num_experts"], sizes["topk"]
+        )
+
+    def forward(
+        self, x, freqs_cis, segments=None, moe_router_load_balancing_type=None,
+        fp32_attn_output=False, deterministic=True, cache=None,
+    ):
+        y, cache = self.attention(
+            x, freqs_cis, segments, fp32_attn_output, deterministic, cache
+        )
+        out, aux = self.moe(y, moe_router_load_balancing_type)
+        return out, aux, cache
+
+
+class InputInjection(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.input_adapter = nn.Linear(dim, dim, bias=False)
+        self.A_log = nn.Parameter(torch.randn(dim) * 0.1)
+        self.dt_bias = nn.Parameter(torch.randn(dim) * 0.1)
+
+    def forward(self, state, input_embeds):
+        dt = F.softplus(self.dt_bias)
+        decay = torch.exp(-dt * torch.exp(self.A_log))
+        return state * decay + dt * self.input_adapter(input_embeds)
+
+
+class TransformerOutputLayer(nn.Module):
+    def __init__(self, dim: int, vocab: int):
+        super().__init__()
+        self.final_norm = GroupRMSNorm(dim)
+        self.output = nn.Linear(dim, vocab, bias=False)
+
+    def forward(self, x, y, mask=None):
+        del y, mask
+        return self.output(self.final_norm(x)).float()
+
+
+class _Rope:
+    def __init__(self, dim: int, base: float = 10000.0) -> None:
+        self.freqs = 1.0 / torch.tensor(
+            [base ** (j / dim) for j in range(0, dim, 2)], dtype=torch.float32
+        )
+
+    def get_freqs_cis(self, start: int, end: int, device) -> torch.Tensor:
+        positions = torch.arange(start, end, dtype=torch.float32, device=device)
+        angles = torch.outer(positions, self.freqs.to(device))
+        return torch.polar(torch.ones_like(angles), angles)
+
+
+class Huginn(nn.Module):
+    def __init__(
+        self, *, prelude: int = 1, recurrent: int = 2, coda: int = 1,
+        loops: int = 2, num_experts: int = 6, seed: int = 0,
+    ) -> None:
+        super().__init__()
+        torch.manual_seed(seed)
+        sizes = {
+            "dim": 8, "n_heads": 4, "n_kv_heads": 2, "head_dim": 4,
+            "inter_dim": 3, "num_experts": num_experts, "topk": 2,
+        }
+        self.num_layers = prelude + recurrent + coda
+        self.huginn_prelude_layers = prelude
+        self.huginn_recurrent_layers = recurrent
+        self.huginn_coda_layers = coda
+        self.loop_times = loops
+        self.loop_start_layer = prelude
+        self.loop_end_layers = prelude + recurrent
+        self.huginn_state_init = "normal"
+        self.huginn_hierarchical_state = "none"
+        self.embed = nn.Embedding(17, sizes["dim"])
+        self.rope = _Rope(sizes["head_dim"])
+        self.layers = nn.ModuleList(
+            TransformerMoEBlock(index, **sizes) for index in range(self.num_layers)
+        )
+        self.input_injection = InputInjection(sizes["dim"])
+        self.output = TransformerOutputLayer(sizes["dim"], 17)
+
+    def initialize_recurrent_state(self, input_embeds, cache_len=0):
+        batch, length, dim = input_embeds.shape
+        row = torch.arange(batch, dtype=torch.float32).view(-1, 1, 1) * 0.37
+        position = torch.arange(cache_len, cache_len + length).view(1, -1, 1) * 0.21
+        channel = torch.arange(dim, dtype=torch.float32).view(1, 1, -1) * 0.13
+        return (0.5 * torch.sin(row + position + channel + 0.1)).to(input_embeds.dtype)
+
+    def _run_layers(self, layer_ids, hidden, freqs):
+        for layer_id in layer_ids:
+            hidden, _aux, _cache = self.layers[layer_id](
+                hidden, freqs, None, moe_router_load_balancing_type=None,
+                fp32_attn_output=False, deterministic=True, cache=None,
+            )
+        return hidden
+
+    def forward(
+        self, tokens, multi_segments, targets=None, token_mask=None,
+        moe_router_load_balancing_type=None, fp32_attn_output=False,
+        deterministic=True, cache=None,
+    ):
+        del multi_segments, moe_router_load_balancing_type, fp32_attn_output
+        del deterministic, cache
+        hidden = self.embed(tokens)
+        freqs = self.rope.get_freqs_cis(0, tokens.shape[1], hidden.device)
+        hidden = self._run_layers(range(self.loop_start_layer), hidden, freqs)
+        input_embeds = hidden
+        hidden = self.initialize_recurrent_state(input_embeds)
+        for _ in range(self.loop_times):
+            hidden = self.input_injection(hidden, input_embeds)
+            hidden = self._run_layers(
+                range(self.loop_start_layer, self.loop_end_layers), hidden, freqs
+            )
+        hidden = self._run_layers(
+            range(self.loop_end_layers, self.num_layers), hidden, freqs
+        )
+        return self.output(hidden, targets, token_mask), None, None
+
+
+def _tiny_config(model: Huginn) -> dict[str, object]:
+    return {
+        "model": {
+            "num_layers": model.num_layers,
+            "huginn_prelude_layers": model.huginn_prelude_layers,
+            "huginn_recurrent_layers": model.huginn_recurrent_layers,
+            "huginn_coda_layers": model.huginn_coda_layers,
+            "loop_times": model.loop_times,
+            "huginn_hierarchical_state": "none",
+        }
+    }
+
+
+def _tiny_backend(**kwargs: int) -> tuple[Huginn, XLLMHuginnLinearized]:
+    model = Huginn(**kwargs).eval()
+    return model, XLLMHuginnLinearized(model, _tiny_config(model))
+
+
+_TOKENS = [1, 5, 9, 3, 12]
+
+
+def _native_logits(model: Huginn, tokens=_TOKENS, copies: int = 1) -> torch.Tensor:
+    ids = torch.tensor([list(tokens)] * copies)
+    with torch.no_grad():
+        return model(ids, multi_segments=False)[0]
+
+
+def _patched_forwards(model: nn.Module) -> list[str]:
+    return [name for name, module in model.named_modules() if "forward" in module.__dict__]
+
+
+def test_linearized_backend_satisfies_protocol_and_identity() -> None:
+    _model, backend = _tiny_backend()
+
+    assert isinstance(backend, MoELinearizationBackend)
+    assert len(backend.schedule) == 6
+    assert backend.identity.num_experts == 6
+    assert backend.identity.expert_width == 3
+    assert backend.identity.top_k == 2
+    assert backend.identity.router_activation == "sigmoid"
+    assert backend.identity.router_normalization == "selected_renormalized"
+    assert backend.identity.has_shared_experts is False
+
+
+def test_linearized_backend_accepts_attribute_config() -> None:
+    model = Huginn().eval()
+    config = SimpleNamespace(**_tiny_config(model)["model"])
+
+    backend = XLLMHuginnLinearized(model, config)
+
+    assert [slot.virtual_depth for slot in backend.schedule] == list(range(6))
+
+
+def test_frozen_rms_uses_cached_rstd_and_preserves_forward_values() -> None:
+    model, backend = _tiny_backend()
+    norm = model.output.final_norm
+    first = torch.randn(1, 3, 8, requires_grad=True)
+    second = 3.0 * torch.randn(1, 3, 8)
+    native_first = norm(first).detach()
+    native_rstd = torch.rsqrt(first.detach().pow(2).mean(-1, keepdim=True) + norm.eps)
+
+    with backend:
+        backend._reset(replay=False)
+        patched_first = norm(first)
+        gradient = torch.autograd.grad(patched_first[0, 1, 2], first)[0]
+        backend._reset(replay=True)
+        patched_second = norm(second)
+
+    torch.testing.assert_close(patched_first.detach(), native_first)
+    expected_gradient = torch.zeros_like(first)
+    expected_gradient[0, 1, 2] = native_rstd[0, 1, 0] * (norm.weight[2].detach() + 1)
+    torch.testing.assert_close(gradient, expected_gradient)
+    torch.testing.assert_close(
+        patched_second, second * native_rstd * (norm.weight.detach() + 1)
+    )
+
+
+def _attention_inputs(module: CausalSoftmaxAttention, length: int = 5):
+    generator = torch.Generator().manual_seed(11)
+    xq = torch.randn(1, length, module.n_heads * module.head_dim, generator=generator)
+    xk = torch.randn(1, length, module.n_kv_heads * module.head_dim, generator=generator)
+    xv = torch.randn(1, length, module.n_kv_heads * module.head_dim, generator=generator)
+    freqs = _Rope(module.head_dim).get_freqs_cis(0, length, xq.device)
+    return xq, xk, xv, freqs
+
+
+def test_explicit_attention_matches_native_and_freezes_pattern() -> None:
+    model, backend = _tiny_backend()
+    attention = model.layers[0].attention.causal_attention
+    xq, xk, xv, freqs = _attention_inputs(attention)
+    native, _cache = attention(xq, xk, xv, None, freqs, None)
+    xq = xq.clone().requires_grad_(True)
+    xv = xv.clone().requires_grad_(True)
+
+    with backend:
+        backend._reset(replay=False)
+        patched, cache = attention(xq, xk, xv, None, freqs, None)
+        query_gradient, value_gradient = torch.autograd.grad(
+            patched.sum(), (xq, xv), allow_unused=True
+        )
+
+    assert cache is None
+    assert patched.shape == native.shape
+    torch.testing.assert_close(patched.detach(), native)
+    assert query_gradient is None or torch.count_nonzero(query_gradient) == 0
+    assert value_gradient is not None and torch.count_nonzero(value_gradient) > 0
+
+
+def test_explicit_attention_repeats_six_kv_heads_to_24_query_heads() -> None:
+    attention = CausalSoftmaxAttention(n_heads=24, n_kv_heads=6, head_dim=2)
+    _model, backend = _tiny_backend()
+    xq, xk, xv, freqs = _attention_inputs(attention)
+    native, _cache = attention(xq, xk, xv, None, freqs, None)
+    changed_value = xv.clone().reshape(1, 5, 6, 2)
+    changed_value[:, :, 1] += 10.0
+    changed_value = changed_value.reshape(1, 5, 12)
+
+    with backend:
+        backend._patch(attention, _attention_forward)
+        backend._reset(replay=False)
+        patched, _cache = attention(xq, xk, xv, None, freqs, None)
+        backend._reset(replay=True)
+        changed, _cache = attention(xq, xk, changed_value, None, freqs, None)
+
+    assert "forward" not in attention.__dict__
+    torch.testing.assert_close(patched, native)
+    difference = (changed - patched).reshape(1, 5, 24, 2).abs().amax(dim=(0, 1, 3))
+    assert torch.all(difference[4:8] > 0)
+    assert torch.count_nonzero(difference[:4]) == 0
+    assert torch.count_nonzero(difference[8:]) == 0
+
+
+def test_explicit_attention_masks_future_positions() -> None:
+    model, backend = _tiny_backend()
+    attention = model.layers[0].attention.causal_attention
+    xq, xk, xv, freqs = _attention_inputs(attention)
+    changed_key = xk.clone()
+    changed_value = xv.clone()
+    changed_key[:, -1] += 5.0
+    changed_value[:, -1] += 5.0
+
+    with backend:
+        backend._reset(replay=False)
+        baseline, _cache = attention(xq, xk, xv, None, freqs, None)
+        backend._reset(replay=False)
+        changed, _cache = attention(xq, changed_key, changed_value, None, freqs, None)
+
+    torch.testing.assert_close(changed[:, :-1], baseline[:, :-1])
+    assert not torch.allclose(changed[:, -1], baseline[:, -1])
+
+
+def test_patched_forward_matches_native_logits_in_both_modes() -> None:
+    model, backend = _tiny_backend()
+    native = _native_logits(model)
+
+    with backend:
+        direct = backend.forward(_TOKENS, mode="direct")
+        total = backend.forward(_TOKENS, mode="total")
+
+    torch.testing.assert_close(direct.detach(), native)
+    torch.testing.assert_close(total.detach(), native)
+
+
+def test_route_snapshots_preserve_ids_rank_row_and_weight() -> None:
+    model, backend = _tiny_backend()
+    routers = [layer.moe.router for layer in model.layers]
+    for router in routers:
+        router.native_calls.clear()
+
+    with backend:
+        backend.forward(_TOKENS, mode="total")
+        snapshot = backend.routing_snapshot
+        neurons = list(backend.routed_neurons())
+
+    calls = {
+        slot.virtual_depth: routers[slot.physical_layer].native_calls[
+            slot.recurrence_iteration or 0
+        ]
+        for slot in backend.schedule
+    }
+    width = backend.identity.expert_width
+    assert snapshot.selected_experts.shape == (6, len(_TOKENS), 2)
+    assert torch.all(snapshot.selected_expert_counts == 2)
+    for depth, (indices, weights) in calls.items():
+        torch.testing.assert_close(snapshot.selected_experts[depth], indices[0])
+        torch.testing.assert_close(snapshot.routing_weights[depth], weights[0])
+    assert len(neurons) == 6 * len(_TOKENS) * 2 * width
+    for neuron in neurons[:: width]:
+        indices, weights = calls[neuron.slot.virtual_depth]
+        assert neuron.expert_id == int(indices[0, neuron.position, neuron.router_rank])
+        assert neuron.routing_weight == pytest.approx(
+            float(weights[0, neuron.position, neuron.router_rank])
+        )
+
+
+def test_direct_expert_leaves_map_grouped_rows_to_position_and_expert() -> None:
+    model, backend = _tiny_backend()
+    captured: dict[int, list[torch.Tensor]] = {}
+    hooks = [
+        layer.moe.norm.register_forward_hook(
+            lambda module, args, output, index=index: captured.setdefault(
+                index, []
+            ).append(output.detach())
+        )
+        for index, layer in enumerate(model.layers)
+    ]
+
+    try:
+        with backend:
+            backend.forward(_TOKENS, copies=2, mode="direct")
+            neurons = list(backend.routed_neurons())
+            values = backend.activations(neurons)
+    finally:
+        for hook in hooks:
+            hook.remove()
+
+    experts = model.layers[0].moe.experts
+    width = experts.inter_dim
+    for neuron, value in zip(neurons, values, strict=True):
+        slot = neuron.slot
+        layer = model.layers[slot.physical_layer].moe.experts
+        hidden = captured[slot.physical_layer][slot.recurrence_iteration or 0]
+        row = hidden[0, neuron.position]
+        start = neuron.expert_id * width
+        gate = row @ layer.weight1[start + neuron.expert_neuron].detach()
+        up = row @ layer.weight3[start + neuron.expert_neuron].detach()
+        torch.testing.assert_close(value, F.silu(gate) * up)
+
+
+def test_unselected_expert_cannot_change_frozen_route_output() -> None:
+    model, backend = _tiny_backend(num_experts=8)
+
+    with backend:
+        baseline = backend.forward(_TOKENS[:3], mode="total").detach()
+        selected = set(backend.routing_snapshot.selected_experts[0].flatten().tolist())
+        unselected = next(expert for expert in range(8) if expert not in selected)
+        experts = model.layers[0].moe.experts
+        width = experts.inter_dim
+        with torch.no_grad():
+            rows = slice(unselected * width, (unselected + 1) * width)
+            experts.weight1[rows] += 50.0
+            experts.weight3[rows] -= 50.0
+            experts.weight2[unselected * 8 : (unselected + 1) * 8] += 50.0
+        replayed = backend.forward(_TOKENS[:3], copies=2, replay=True, mode="direct")
+
+    torch.testing.assert_close(replayed[0].detach(), baseline[0])
+    torch.testing.assert_close(replayed[1].detach(), baseline[0])
+
+
+def test_half_rule_forward_equals_native_swiglu() -> None:
+    _model, backend = _tiny_backend()
+
+    with backend:
+        backend.forward(_TOKENS, mode="total")
+        total_values = backend.activations(list(backend.routed_neurons()))
+        backend.forward(_TOKENS, copies=3, mode="direct")
+        neurons = list(backend.routed_neurons())
+        direct_values = backend.activations(neurons)
+        targets = backend.direct_targets([0, 7, 31], 3, _TOKENS)
+
+    torch.testing.assert_close(total_values, direct_values)
+    torch.testing.assert_close(targets.targets, direct_values[[0, 7, 31]])
+
+
+def test_replay_copies_row_zero_recurrent_state_across_edge_rows() -> None:
+    model, backend = _tiny_backend()
+    native_row_zero = model.initialize_recurrent_state(torch.zeros(1, len(_TOKENS), 8))
+
+    with backend:
+        backend.forward(_TOKENS, copies=1, mode="total")
+        logits = backend.forward(_TOKENS, copies=3, replay=True, mode="direct")
+        state = backend.state_leaf
+        fresh = backend.forward(_TOKENS, copies=3, mode="direct")
+        fresh_state = backend.state_leaf
+
+    assert state.shape == (3, len(_TOKENS), 8)
+    for row in range(3):
+        torch.testing.assert_close(state[row].detach(), native_row_zero[0])
+        torch.testing.assert_close(fresh_state[row].detach(), native_row_zero[0])
+        torch.testing.assert_close(logits[row].detach(), fresh[0].detach())
+    assert state.requires_grad
+
+
+def test_invocation_counts_map_8_96_8_calls_to_112_virtual_depths() -> None:
+    model, backend = _tiny_backend(prelude=8, recurrent=12, coda=8, loops=8)
+
+    with backend:
+        backend.forward(_TOKENS[:2], mode="direct")
+        neurons = backend.routed_neurons()
+        depths = sorted({neuron.slot.virtual_depth for neuron in neurons})
+        counts = dict(backend.invocation_counts)
+
+    assert depths == list(range(112))
+    experts = [id(layer.moe.experts) for layer in model.layers]
+    assert [counts[key] for key in experts] == [1] * 8 + [8] * 12 + [1] * 8
+    recurrent = [n.slot for n in neurons if n.slot.stage == "recurrent"]
+    assert {slot.recurrence_iteration for slot in recurrent} == set(range(8))
+    assert {
+        (slot.virtual_depth, slot.physical_layer)
+        for slot in recurrent
+        if slot.recurrence_iteration == 7
+    } == {(92 + block, 8 + block) for block in range(12)}
+
+
+def test_unexpected_execution_count_fails_closed() -> None:
+    model, backend = _tiny_backend()
+    model.loop_times = 3
+
+    with backend, pytest.raises(RuntimeError, match="ran 3 times"):
+        backend.forward(_TOKENS, mode="direct")
+
+
+def test_replay_rejects_inconsistent_routes() -> None:
+    model, backend = _tiny_backend()
+
+    with backend:
+        backend.forward(_TOKENS, mode="total")
+        with torch.no_grad():
+            model.layers[0].moe.router.weight.mul_(-1.0)
+        with pytest.raises(RuntimeError, match="replay route"):
+            backend.forward(_TOKENS, copies=2, replay=True, mode="direct")
+
+
+def test_replay_requires_cached_forward_for_same_tokens() -> None:
+    _model, backend = _tiny_backend()
+
+    with backend:
+        with pytest.raises(RuntimeError, match="replay"):
+            backend.forward(_TOKENS, replay=True)
+        backend.forward(_TOKENS, mode="total")
+        with pytest.raises(RuntimeError, match="replay"):
+            backend.forward(_TOKENS[:-1], replay=True)
+
+
+def test_direct_targets_have_contribution_shapes_and_no_self_edges() -> None:
+    _model, backend = _tiny_backend()
+    completion_start = 3
+
+    with backend:
+        backend.forward(_TOKENS, mode="total")
+        axis = list(backend.routed_neurons())
+        backend.forward(_TOKENS, copies=3, replay=True, mode="direct")
+        late = next(
+            index for index, neuron in enumerate(axis)
+            if neuron.slot.virtual_depth == 5 and neuron.position == 2
+        )
+        contribution = backend.direct_targets([late, 2, -1], completion_start, _TOKENS)
+        completion = backend.completion_logprob(0, completion_start, _TOKENS)
+
+    assert tuple(contribution.routed_neurons) == tuple(axis)
+    assert contribution.routed.shape == (3, len(axis))
+    assert contribution.token_embeddings.shape == (3, len(_TOKENS))
+    assert contribution.source_leaves == (
+        MoESourceLeaf(
+            "recurrent_state",
+            kind="huginn_state",
+            metadata=(("state_init", "normal"),),
+        ),
+    )
+    assert contribution.source_contributions.shape == (3, 1)
+    assert contribution.routed[0, late] == 0
+    assert contribution.routed[1, 2] == 0
+    later = [
+        index for index, neuron in enumerate(axis)
+        if neuron.slot.virtual_depth >= 5 or neuron.position > 2
+    ]
+    assert torch.count_nonzero(contribution.routed[0, later]) == 0
+    assert torch.count_nonzero(contribution.routed[0]) > 0
+    assert torch.count_nonzero(contribution.token_embeddings[0]) > 0
+    assert torch.count_nonzero(contribution.routed[2]) > 0
+    torch.testing.assert_close(contribution.targets[2], completion.detach())
+    assert contribution.source_contributions[0, 0] != 0
+
+
+def test_direct_targets_reject_invalid_requests() -> None:
+    _model, backend = _tiny_backend()
+
+    with backend:
+        backend.forward(_TOKENS, copies=2, mode="direct")
+        with pytest.raises(ValueError, match="copies"):
+            backend.direct_targets([0, 1, -1], 3, _TOKENS)
+        backend.forward(_TOKENS, copies=2, mode="total")
+        with pytest.raises(RuntimeError, match="direct"):
+            backend.direct_targets([0, -1], 3, _TOKENS)
+        with pytest.raises(ValueError, match="routed axis"):
+            backend.forward(_TOKENS, copies=2, mode="direct")
+            backend.direct_targets([10**6], 3, _TOKENS)
+
+
+def test_candidate_effects_align_with_routed_axis() -> None:
+    _model, backend = _tiny_backend()
+
+    with backend:
+        backend.forward(_TOKENS, mode="total")
+        effects = backend.candidate_effects(3, _TOKENS)
+        axis = backend.routed_neurons()
+
+    assert effects.shape == (len(axis),)
+    assert torch.count_nonzero(effects) > 0
+    assert not effects.requires_grad
+
+
+def test_tiny_xllm_backend_builds_generic_graph() -> None:
+    _model, backend = _tiny_backend()
+
+    with backend:
+        graph = build_moe_graph(backend, _TOKENS, 3, k=12, batch=4, max_edges=200)
+
+    neurons = [node for node in graph["nodes"] if node["kind"] == "neuron"]
+    assert neurons
+    assert all(0 <= node["expert_id"] < 6 for node in neurons)
+    assert all(node["router_rank"] in {0, 1} for node in neurons)
+    assert graph["metadata"]["model_identity"]["model_family"] == "xllm-huginn"
+
+
+def test_context_exit_restores_forwards_and_requires_grad_after_success() -> None:
+    model, backend = _tiny_backend()
+    model.layers[0].moe.experts.weight1.requires_grad_(False)
+    before = {name: p.requires_grad for name, p in model.named_parameters()}
+    original_init = model.__dict__.get("initialize_recurrent_state")
+
+    with backend:
+        assert _patched_forwards(model)
+        assert not any(p.requires_grad for p in model.parameters())
+        backend.forward(_TOKENS, mode="total")
+
+    assert _patched_forwards(model) == []
+    assert model.__dict__.get("initialize_recurrent_state") is original_init
+    assert {name: p.requires_grad for name, p in model.named_parameters()} == before
+    assert not any(hasattr(m, "_xllm_linearized") for m in model.modules())
+    torch.testing.assert_close(_native_logits(model), _native_logits(Huginn().eval()))
+
+
+def test_context_exit_restores_forwards_after_error() -> None:
+    model, backend = _tiny_backend()
+    before = {name: p.requires_grad for name, p in model.named_parameters()}
+
+    with pytest.raises(RuntimeError, match="ran 3 times"), backend:
+        model.loop_times = 3
+        backend.forward(_TOKENS, mode="direct")
+    model.loop_times = 2
+    with pytest.raises(ValueError, match="boom"), backend:
+        raise ValueError("boom")
+
+    assert _patched_forwards(model) == []
+    assert "initialize_recurrent_state" not in model.__dict__
+    assert {name: p.requires_grad for name, p in model.named_parameters()} == before
+
+
+def test_backend_rejects_unexpected_runtime_classes() -> None:
+    model = Huginn().eval()
+    model.layers[0].moe.fc1 = nn.Linear(8, 3)
+
+    with pytest.raises(RuntimeError, match="shared experts"):
+        XLLMHuginnLinearized(model, _tiny_config(model))
+
+    other = Huginn().eval()
+    other.huginn_state_init = "input"
+    with pytest.raises(RuntimeError, match="state init"):
+        XLLMHuginnLinearized(other, _tiny_config(other))
+
+
+def test_forward_requires_entered_context() -> None:
+    _model, backend = _tiny_backend()
+
+    with pytest.raises(RuntimeError, match="context"):
+        backend.forward(_TOKENS)
+
+
+def test_importing_linearized_does_not_import_xllm() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "import neuron_explorer.attribution.moe.xllm_huginn.linearized; "
+                "assert not any(name == 'xllm' or name.startswith('xllm.') "
+                "for name in sys.modules)"
+            ),
+        ],
+        check=False,
         text=True,
         capture_output=True,
     )
