@@ -202,6 +202,12 @@ class XLLMHuginnLinearized:
             )
         self._state_init = str(state_init)
 
+        injection = getattr(model, "input_injection", None)
+        if type(injection).__name__ != "InputInjection":
+            raise RuntimeError(
+                f"expected diagonal InputInjection, got {type(injection).__name__}"
+            )
+
         layers = list(model.layers)
         physical_layers = 1 + max(slot.physical_layer for slot in self.schedule)
         if len(layers) != physical_layers:
@@ -226,6 +232,18 @@ class XLLMHuginnLinearized:
         self._expert_layer: dict[int, int] = {}
         self._expert_router: dict[int, torch.nn.Module] = {}
         for index, layer in enumerate(layers):
+            attention = layer.attention
+            if getattr(attention, "apply_attn_gate", False) or (
+                getattr(attention, "wr", None) is not None
+            ):
+                raise RuntimeError(f"layer {index} enables an attention output gate")
+            for name, owner in (("attention", attention), ("MoE", layer.moe)):
+                residual = type(getattr(owner, "residual", None)).__name__
+                if residual != "BaseResidual":
+                    raise RuntimeError(
+                        f"layer {index} {name} residual is {residual}, "
+                        "expected BaseResidual"
+                    )
             block = layer.moe
             if getattr(block, "fc1", None) is not None or getattr(
                 block, "n_shared_experts", 0

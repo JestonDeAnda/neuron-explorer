@@ -1085,6 +1085,21 @@ class CausalSoftmaxAttention(nn.Module):
         return output.reshape(batch, length, -1), None
 
 
+class BaseResidual(nn.Module):
+    def forward(self, h, residual, *args, **kwargs):
+        del args, kwargs
+        return h + residual
+
+
+class OrthoResidual(BaseResidual):
+    def forward(self, h, residual, *args, **kwargs):
+        del args, kwargs
+        coefficient = (h * residual).sum(-1, keepdim=True) / (
+            residual.square().sum(-1, keepdim=True) + 1e-6
+        )
+        return h - coefficient * residual + residual
+
+
 class MultiheadAttention(nn.Module):
     def __init__(self, dim: int, n_heads: int, n_kv_heads: int, head_dim: int):
         super().__init__()
@@ -1094,6 +1109,9 @@ class MultiheadAttention(nn.Module):
         self.wv = nn.Linear(dim, n_kv_heads * head_dim, bias=False)
         self.causal_attention = CausalSoftmaxAttention(n_heads, n_kv_heads, head_dim)
         self.wo = nn.Linear(n_heads * head_dim, dim, bias=False)
+        self.apply_attn_gate = False
+        self.wr = None
+        self.residual = BaseResidual()
 
     def forward(
         self, x, freqs_cis, segments=None, fp32_attn_output=False,
@@ -1104,7 +1122,7 @@ class MultiheadAttention(nn.Module):
             self.wq(hidden), self.wk(hidden), self.wv(hidden), None, freqs_cis,
             segments, fp32_attn_output, deterministic, cache,
         )
-        return x + self.wo(attention), new_cache
+        return self.residual(self.wo(attention), x, c=attention), new_cache
 
 
 class TopKRouter(nn.Module):
@@ -1165,6 +1183,7 @@ class NormalizedMoE(nn.Module):
         self.fc1 = None
         self.fc2 = None
         self.fc3 = None
+        self.residual = BaseResidual()
 
     def forward(self, x, load_balancing_type=None):
         batch, length, _ = x.shape
@@ -1178,7 +1197,8 @@ class NormalizedMoE(nn.Module):
         )
         weights = scores.flatten()[sorted_indices].unsqueeze(-1)
         combined = torch.zeros_like(flat).index_add(0, permute_indices, routed * weights)
-        return x + combined.reshape(batch, length, -1), aux
+        y = combined.reshape(batch, length, -1)
+        return self.residual(y, x, c=y), aux
 
 
 class TransformerMoEBlock(nn.Module):
@@ -1752,6 +1772,49 @@ def test_context_exit_restores_forwards_after_error() -> None:
     assert _patched_forwards(model) == []
     assert "initialize_recurrent_state" not in model.__dict__
     assert {name: p.requires_grad for name, p in model.named_parameters()} == before
+
+
+def _gate_flag(model: Huginn) -> None:
+    model.layers[1].attention.apply_attn_gate = True
+
+
+def _gate_module(model: Huginn) -> None:
+    model.layers[0].attention.wr = nn.Linear(8, 16, bias=False)
+
+
+def _ortho_attention(model: Huginn) -> None:
+    model.layers[1].attention.residual = OrthoResidual()
+
+
+def _ortho_moe(model: Huginn) -> None:
+    model.layers[2].moe.residual = OrthoResidual()
+
+
+def _linear_injection(model: Huginn) -> None:
+    model.input_injection = type("LinearInputInjection", (InputInjection,), {})(8)
+
+
+def _no_injection(model: Huginn) -> None:
+    model.input_injection = None
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (_gate_flag, "attention output gate"),
+        (_gate_module, "attention output gate"),
+        (_ortho_attention, "attention residual"),
+        (_ortho_moe, "MoE residual"),
+        (_linear_injection, "InputInjection"),
+        (_no_injection, "InputInjection"),
+    ],
+)
+def test_backend_rejects_nonlinear_paths_it_does_not_linearize(mutate, message) -> None:
+    model = Huginn().eval()
+    mutate(model)
+
+    with pytest.raises(RuntimeError, match=message):
+        XLLMHuginnLinearized(model, _tiny_config(model))
 
 
 def test_backend_rejects_unexpected_runtime_classes() -> None:
