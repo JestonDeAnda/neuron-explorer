@@ -23,6 +23,37 @@ an explicitly configured root. See [Explorer](explorer.md) for path
 environment variables, [sweeps](sweeps.md) for executable data formats, and
 [attribution](attribution.md) for the stable graph APIs.
 
+## MoE attribution tests
+
+The MoE code has two layers with separate tests:
+
+- `tests/attribution/test_moe_core.py` covers the runtime-neutral contract
+  in `neuron_explorer.attribution.moe` with the eager reference backends and a
+  synthetic two-million-entry lazy axis. That test fails if the graph builder
+  iterates or slices the axis, requests direct contributions for every routed
+  column, or keeps a previous direct chunk alive.
+- `tests/attribution/test_moe_huginn.py` covers the xLLM schedule, runtime
+  identity, mounts, linearization, graph wrapper, resume, manifest, benchmark,
+  and smoke. Its tiny modules carry the public class names and attributes of
+  the pinned xLLM classes, so `XLLMHuginnLinearized` patches them exactly as
+  it patches the real runtime. Runner tests replace only `load_xllm_huginn`
+  with a 25-expert, width-2432 tiny model and run on CPU.
+
+```bash
+uv run pytest tests/attribution/test_moe_core.py tests/attribution/test_moe_huginn.py -q
+uv run python scripts/run_moe_huginn_attribution.py --help
+uv run python scripts/moe_huginn_mount_check.py --help
+```
+
+Importing `neuron_explorer.attribution.moe` or its `xllm_huginn` package must
+never import `xllm`; only `load_xllm_huginn` imports it, after verifying the
+pinned source checkout. Several mount and source tests create temporary git
+repositories, so they fail inside sandboxes that forbid `git init` outside the
+workspace. A new MoE runtime implements `MoELinearizationBackend`, returns a
+lazy routed axis, honors `direct_targets(..., sources=...)`, and gets its own
+subpackage beside `xllm_huginn`; do not change `attribution/huginn/` defaults,
+which belong to the dense version-2 Huginn-0125 graphs.
+
 ## `mirror.py`
 
 Purpose: recursively mirror the public “Neural Networks Are Already Clean”

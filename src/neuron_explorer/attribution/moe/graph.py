@@ -21,6 +21,10 @@ def _influence(matrix: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return total
 
 
+def _same_axis(left: Sequence[Any], right: Sequence[Any]) -> bool:
+    return left is right or (len(left) == len(right) and left == right)
+
+
 def _serialize_edges(
     adjacency: torch.Tensor,
     edge_mask: torch.Tensor,
@@ -56,67 +60,77 @@ def build_moe_graph(
         raise ValueError("max_edges must be positive or None")
 
     backend.forward(ids, mode="total")
-    routed_axis = tuple(backend.routed_neurons())
+    routed_axis = backend.routed_neurons()
+    n_routed = len(routed_axis)
     effects = backend.candidate_effects(completion_start, ids).detach().float()
-    if effects.ndim != 1 or effects.numel() != len(routed_axis):
+    if effects.ndim != 1 or effects.numel() != n_routed:
         raise ValueError("candidate effects must align with the routed-neuron axis")
-    effective_k = min(int(k), len(routed_axis))
-    chosen = effects.abs().topk(effective_k).indices
-    selected = tuple(routed_axis[int(index)] for index in chosen)
-    captured = float(
-        effects.abs()[chosen].sum() / effects.abs().sum().clamp(min=1e-12)
-    )
+    effective_k = min(int(k), n_routed)
+    magnitude = effects.abs()
+    top = magnitude.topk(effective_k)
+    captured = float(top.values.sum() / magnitude.sum().clamp(min=1e-12))
+    chosen = [int(index) for index in top.indices.tolist()]
+    del effects, magnitude, top
+    selected = tuple(routed_axis[index] for index in chosen)
 
     backend.forward(ids, copies=batch, replay=True, mode="direct")
-    activations = backend.activations(selected).detach().float()
+    if not _same_axis(backend.routed_neurons(), routed_axis):
+        raise ValueError("the direct replay changed the routed-neuron axis")
+    activations = backend.activations(selected).detach().float().cpu()
     length = len(ids)
     logical_target_rows = list(range(effective_k)) + [-1]
-    global_targets = [int(index) for index in chosen] + [-1]
-    chunks = []
-    source_axis = None
+    global_targets = chosen + [-1]
+    source_axis: tuple[Any, ...] | None = None
+    adjacency = other = None
+    source_start = effective_k + length
+    target_node = n_nodes = 0
+    completion_value: float | None = None
     for start in range(0, len(logical_target_rows), batch):
-        rows = logical_target_rows[start : start + batch]
+        logical_rows = logical_target_rows[start : start + batch]
         requested = global_targets[start : start + batch]
-        contribution = backend.direct_targets(requested, completion_start, ids)
-        if tuple(contribution.routed_neurons) != tuple(backend.routed_neurons()):
+        contribution = backend.direct_targets(
+            requested, completion_start, ids, sources=chosen
+        )
+        if not _same_axis(contribution.routed_neurons, routed_axis):
             raise ValueError("direct contributions changed the routed-neuron axis")
-        if contribution.routed.shape != (len(rows), len(routed_axis)):
+        if contribution.routed_columns is None or tuple(
+            contribution.routed_columns
+        ) != tuple(chosen):
+            raise ValueError("routed contributions do not match the requested source columns")
+        if contribution.routed.shape != (len(logical_rows), effective_k):
             raise ValueError("routed contributions have an invalid shape")
-        if contribution.token_embeddings.shape != (len(rows), length):
+        if contribution.token_embeddings.shape != (len(logical_rows), length):
             raise ValueError("token-embedding contributions have an invalid shape")
         if contribution.source_contributions.shape != (
-            len(rows),
+            len(logical_rows),
             len(contribution.source_leaves),
         ):
             raise ValueError("named source contributions have an invalid shape")
         if source_axis is None:
-            source_axis = contribution.source_leaves
-        elif source_axis != contribution.source_leaves:
+            source_axis = tuple(contribution.source_leaves)
+            target_node = source_start + len(source_axis)
+            n_nodes = target_node + 1
+            adjacency = torch.zeros(n_nodes, n_nodes)
+            other = torch.zeros(n_nodes)
+        elif source_axis != tuple(contribution.source_leaves):
             raise ValueError("direct contributions changed the named source axis")
-        chunks.append((rows, requested, contribution))
-
-    source_axis = tuple(source_axis or ())
-    source_start = effective_k + length
-    target_node = source_start + len(source_axis)
-    n_nodes = target_node + 1
-    adjacency = torch.zeros(n_nodes, n_nodes)
-    other = torch.zeros(n_nodes)
-    completion_value: float | None = None
-
-    for logical_rows, requested, contribution in chunks:
+        assert adjacency is not None and other is not None
         rows = [target_node if row == -1 else row for row in logical_rows]
         row_tensor = torch.tensor(rows, dtype=torch.long)
-        adjacency[row_tensor, :effective_k] = contribution.routed[:, chosen].float()
-        adjacency[row_tensor, effective_k : effective_k + length] = (
-            contribution.token_embeddings.float()
+        adjacency[row_tensor, :effective_k] = contribution.routed.detach().float().cpu()
+        adjacency[row_tensor, effective_k:source_start] = (
+            contribution.token_embeddings.detach().float().cpu()
         )
         adjacency[row_tensor, source_start:target_node] = (
-            contribution.source_contributions.float()
+            contribution.source_contributions.detach().float().cpu()
         )
-        values = contribution.targets.detach().float().reshape(len(rows))
+        values = contribution.targets.detach().float().cpu().reshape(len(rows))
         other[row_tensor] = values - adjacency[row_tensor].sum(1)
         if requested[-1] == -1:
             completion_value = float(values[-1])
+        del contribution, values
+
+    assert source_axis is not None and adjacency is not None and other is not None
 
     diagonal = adjacency.diagonal().clone()
     other = other + diagonal

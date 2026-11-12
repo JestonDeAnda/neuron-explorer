@@ -1,10 +1,15 @@
+import gc
 import math
+import operator
+import weakref
+from collections.abc import Sequence
 from dataclasses import FrozenInstanceError
 
 import pytest
 import torch
 
 from neuron_explorer.attribution.moe import (
+    MoEContributions,
     MoEExecutionSlot,
     MoELinearizationBackend,
     MoEModelIdentity,
@@ -15,8 +20,8 @@ from neuron_explorer.attribution.moe import (
 )
 from neuron_explorer.attribution.moe.graph import _edge_mask
 from neuron_explorer.attribution.moe.reference import (
-    softmax_top1_backend,
     sigmoid_top2_backend,
+    softmax_top1_backend,
 )
 
 
@@ -183,8 +188,10 @@ class _RuntimeNeutralView:
     def candidate_effects(self, completion_start, token_ids):
         return self._backend.candidate_effects(completion_start, token_ids)
 
-    def direct_targets(self, targets, completion_start, token_ids):
-        return self._backend.direct_targets(targets, completion_start, token_ids)
+    def direct_targets(self, targets, completion_start, token_ids, *, sources=None):
+        return self._backend.direct_targets(
+            targets, completion_start, token_ids, sources=sources
+        )
 
     def activations(self, neurons):
         return self._backend.activations(neurons)
@@ -267,3 +274,174 @@ def test_edge_mask_enforces_strict_cap_under_ties():
     mask = _edge_mask(torch.ones(3, 3), edge_threshold=1.0, max_edges=2)
 
     assert int(mask.sum()) == 2
+
+
+@pytest.mark.parametrize("factory", [sigmoid_top2_backend, softmax_top1_backend])
+def test_reference_direct_targets_return_only_requested_source_columns(factory):
+    backend = factory()
+    token_ids = [1, 3, 5, 7]
+    backend.forward(token_ids)
+    full = backend.direct_targets([0, -1], 2, token_ids)
+
+    sources = [5, 1, 9]
+    selected = backend.direct_targets([0, -1], 2, token_ids, sources=sources)
+
+    assert full.routed_columns is None
+    assert selected.routed_columns == (5, 1, 9)
+    assert selected.routed.shape == (2, 3)
+    torch.testing.assert_close(selected.routed, full.routed[:, sources])
+    torch.testing.assert_close(selected.token_embeddings, full.token_embeddings)
+    torch.testing.assert_close(selected.targets, full.targets)
+
+
+class _LazyAxis(Sequence):
+    """A routed axis far too large to copy into Python records."""
+
+    def __init__(self, positions: int, experts: int, width: int) -> None:
+        self.slot = MoEExecutionSlot(0, "body", None, 0, 0)
+        self.positions, self.experts, self.width = positions, experts, width
+        self.reads = 0
+
+    def __len__(self) -> int:
+        return self.positions * self.experts * self.width
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            raise AssertionError("the routed axis was sliced")
+        index = operator.index(index)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        self.reads += 1
+        rest, neuron = divmod(index, self.width)
+        position, expert = divmod(rest, self.experts)
+        return RoutedNeuron(
+            slot=self.slot,
+            position=position,
+            expert_id=expert,
+            expert_neuron=neuron,
+            expert_width=self.width,
+            router_rank=0,
+            routing_weight=1.0,
+        )
+
+    def __iter__(self):
+        raise AssertionError("the routed axis was iterated")
+
+    def __eq__(self, other):
+        return self is other
+
+    __hash__ = None
+
+
+class _LazyAxisBackend:
+    def __init__(self, positions: int = 4, experts: int = 1000, width: int = 500):
+        self.identity = MoEModelIdentity(
+            model_family="lazy",
+            model_name="lazy",
+            num_experts=experts,
+            expert_width=width,
+            top_k=1,
+            router_activation="sigmoid",
+            router_normalization="selected_renormalized",
+        )
+        self.axis = _LazyAxis(positions, experts, width)
+        self.schedule = (self.axis.slot,)
+        self.requested_sources: list[tuple[int, ...]] = []
+
+    def forward(self, token_ids, *, copies=1, replay=False, mode="direct"):
+        return torch.zeros(copies, len(token_ids), 3)
+
+    def routed_neurons(self):
+        return self.axis
+
+    def candidate_effects(self, completion_start, token_ids):
+        effects = torch.zeros(len(self.axis))
+        stride = len(self.axis) // 16
+        effects[torch.arange(16) * stride + 7] = torch.linspace(1.0, 2.0, 16)
+        return effects
+
+    def direct_targets(self, targets, completion_start, token_ids, *, sources=None):
+        if sources is None:
+            raise AssertionError("direct attribution requested every routed column")
+        columns = tuple(int(source) for source in sources)
+        self.requested_sources.append(columns)
+        rows = len(targets)
+        routed = torch.full((rows, len(columns)), 0.05)
+        for row, target in enumerate(targets):
+            if target in columns:
+                routed[row, columns.index(target)] = 0.0
+        return MoEContributions(
+            routed=routed,
+            token_embeddings=torch.full((rows, len(token_ids)), 0.1),
+            source_contributions=torch.zeros(rows, 0),
+            targets=torch.ones(rows),
+            routed_neurons=self.axis,
+            routed_columns=columns,
+        )
+
+    def activations(self, neurons):
+        return torch.ones(len(neurons))
+
+    def completion_logprob(self, row, completion_start, token_ids):
+        return torch.tensor(-1.0)
+
+
+def test_generic_graph_reads_only_chosen_entries_of_a_large_lazy_axis():
+    backend = _LazyAxisBackend()
+
+    graph = build_moe_graph(backend, [1, 2, 3, 4], 2, k=8, batch=3, max_edges=50)
+
+    assert len(backend.axis) == 2_000_000
+    assert backend.axis.reads <= 8
+    assert backend.requested_sources
+    chosen = backend.requested_sources[0]
+    assert len(chosen) == 8
+    assert all(columns == chosen for columns in backend.requested_sources)
+    assert any(node["kind"] == "neuron" for node in graph["nodes"])
+
+
+def test_generic_graph_rejects_misaligned_source_columns():
+    backend = _LazyAxisBackend()
+    original = backend.direct_targets
+
+    def shuffled(targets, completion_start, token_ids, *, sources=None):
+        contribution = original(targets, completion_start, token_ids, sources=sources)
+        return MoEContributions(
+            routed=contribution.routed,
+            token_embeddings=contribution.token_embeddings,
+            source_contributions=contribution.source_contributions,
+            targets=contribution.targets,
+            routed_neurons=contribution.routed_neurons,
+            routed_columns=tuple(reversed(contribution.routed_columns)),
+        )
+
+    backend.direct_targets = shuffled
+
+    with pytest.raises(ValueError, match="source columns"):
+        build_moe_graph(backend, [1, 2, 3, 4], 2, k=8, batch=3)
+
+
+def test_generic_graph_releases_each_direct_chunk_before_the_next():
+    concrete = sigmoid_top2_backend()
+    backend = _RuntimeNeutralView(concrete)
+    alive: list[weakref.ref] = []
+    calls = 0
+
+    def tracked(targets, completion_start, token_ids, *, sources=None):
+        nonlocal calls
+        gc.collect()
+        assert all(reference() is None for reference in alive), (
+            "a previous direct contribution was still referenced"
+        )
+        calls += 1
+        contribution = concrete.direct_targets(
+            targets, completion_start, token_ids, sources=sources
+        )
+        alive.append(weakref.ref(contribution.routed))
+        return contribution
+
+    backend.direct_targets = tracked
+
+    build_moe_graph(backend, [1, 3, 5, 7], completion_start=2, k=6, batch=2)
+
+    assert calls == 4

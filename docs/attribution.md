@@ -108,20 +108,9 @@ Model identity is a content SHA-256 over `config.json`, checkpoint-side Python
 code, and every safetensors/PyTorch weight shard; computing it reads the full
 checkpoint once at process startup.
 `scripts/huginn_mount_check.py` checks the dataset, checkpoint, staged commit,
-and, with `--mounts`, the four DLC storage mounts before any GPU work.
-
-For the xLLM MoE checkpoint, verify the pinned source checkout, extension,
-grouped GEMM, artifact manifest, dataset, staged commit, and output mount first:
-
-```bash
-uv run python scripts/moe_huginn_mount_check.py \
-  --dataset /path/to/按任务 \
-  --model /path/to/LoopedLM-P1-moe-huginn-500b \
-  --xllm-source /path/to/xllm-loop \
-  --stage /path/to/staged/neuron-explorer \
-  --commit "$(git rev-parse HEAD)" \
-  --output-root /path/to/attribution/moe-huginn-500b
-```
+and, with `--mounts`, the four DLC storage mounts before any GPU work. The xLLM
+MoE checkpoint has its own mount check; see
+[xLLM MoE Huginn attribution](#xllm-moe-huginn-attribution).
 
 Huginn completion graphs have one aggregate output pseudo-node rather than one
 next-token logit. Top-level `target.kind` is `completion_logprob`; it includes
@@ -138,6 +127,199 @@ the local intercept plus omitted state and non-candidate effects; the graph is
 not an exact additive decomposition of the nonlinear log-probability value.
 Run metadata records `edge_semantics=local_linear_half_rule_direct` and
 `target_transform=differentiated_log_softmax`.
+
+## xLLM MoE Huginn attribution
+
+`scripts/run_moe_huginn_attribution.py` attributes the
+`IFM/LoopedLM-P1-moe-huginn-500b` checkpoint loaded by its native xLLM-Loop
+runtime. It uses the same four-condition planner, prompt protocol, row seed,
+output layout, aggregate completion target, and resume writer as Huginn-0125,
+but writes attribution implementation version 3. Dense Huginn-0125 graphs stay
+version 2, so a dense graph is never accepted as a current MoE graph.
+
+### Generic MoE backend contract
+
+`neuron_explorer.attribution.moe.build_moe_graph(backend, token_ids,
+completion_start, ...)` knows nothing about xLLM, top-2 routing, sigmoid
+scores, 25 experts, recurrence, grouped GEMM, or FlashAttention. A backend
+implements `MoELinearizationBackend`:
+
+- `identity` (`MoEModelIdentity`) and `schedule` (one `MoEExecutionSlot` per
+  executed MoE layer, with `virtual_depth`, `stage`, `recurrence_iteration`,
+  `physical_layer`, and `physical_block`);
+- `forward(token_ids, copies=, replay=, mode=)`: `mode="total"` for candidate
+  ranking, then a `replay=True`, `mode="direct"` forward that replays the
+  frozen state across `copies` identical edge rows;
+- `routed_neurons()`: the executed routed-neuron axis. It may be lazy and hold
+  tens of millions of entries; the builder only takes `len()`, indexes the
+  chosen candidates, and compares two axes with `is` or the axis's own cheap
+  `==`. It never iterates or copies the axis;
+- `candidate_effects(...)`: one total-effect value per axis entry;
+- `direct_targets(targets, completion_start, token_ids, sources=)`: one row
+  per target (axis index, or `-1` for the completion target). With `sources`,
+  `routed` has one column per requested axis index, in order, and
+  `routed_columns` echoes them; the builder always passes the `k` chosen
+  candidates, so no rows × all-neuron matrix exists. Token-embedding and named
+  source-leaf columns are always returned;
+- `activations(neurons)` and `completion_logprob(row, ...)`.
+
+The builder fills the `(k + tokens + sources + 1)²` adjacency one direct-edge
+chunk at a time and drops each chunk's tensors before requesting the next.
+`neuron_explorer.attribution.moe.reference` holds two tiny eager backends
+(sigmoid top-2 and softmax top-1) that prove the contract is runtime-neutral.
+
+### Revisions and scientific scope
+
+The xLLM source is pinned to commit
+`755c7b3a91081fe0f83500eabd53bd2490b8b745` (`XLLM_SOURCE_COMMIT`). The loader
+requires the checkout top level at that commit with no tracked modifications
+and refuses a pre-imported foreign `xllm`. The model revision is the checkpoint
+content fingerprint `checkpoint-sha256:<hex>` over `config.json`, the artifact
+manifest and safetensors index, tokenizer files, checkpoint-side Python, and
+every weight shard. Loading also verifies 28 physical blocks, schedule
+8 + 12×8 + 8 = 112 virtual MoE depths, 25 experts, top-2 routing, expert width
+2432, tokenizer length 250,624, BOS 0, and a strict tensor-for-tensor state
+dict.
+
+The graph explains the model with its routing decisions held fixed. Top-k
+expert IDs and normalized sigmoid weights (selected weights summing to one)
+are frozen at their forward values, as are RMSNorm denominators and the
+explicit fp32 causal attention pattern; gradients do not flow through the
+router, and unselected experts cannot enter the graph. A routing change caused
+by an upstream edit is therefore outside what these edges describe. Router IDs
+and weights are recorded on expert nodes and in metadata, but there is no
+router node. Each `SiLU(gate) * up` expert activation is a source leaf; total
+mode uses the half rule with a forward-value correction, and direct mode stops
+gradient at the leaf. All edge rows replay the row-0 recurrent state, so edge
+copies are replicas of one prompt and do not change edge values.
+
+### Expert node identity
+
+Expert neurons keep `kind="neuron"` and add:
+
+- `virtual_depth` (also `layer`), `stage`, `recurrence_iteration`,
+  `physical_layer`, `physical_block`, and token `pos`;
+- `expert_id` (0–24), `runtime_expert_id`, `expert_kind="routed"`, and
+  `expert_neuron` (0–2431);
+- `n = physical_neuron = expert_id * 2432 + expert_neuron`, unique within one
+  physical MoE layer;
+- `router_rank` (0 or 1) and frozen `routing_weight` (also `gate`);
+- `shared_weight_id = "<stage>:<physical_block>:e<expert_id>:n<expert_neuron>"`,
+  identical for the same recurrent parameters across all eight iterations;
+- `act`, `influence`, and residual `other`.
+
+An expert-local index is meaningless without its expert ID; never compare
+`expert_neuron` across experts.
+
+Graph metadata adds `runtime="xllm"`, `xllm_source_commit`, the full
+`schedule`, `routing`
+(`{"frozen": true, "score": "sigmoid", "normalization": "selected_sum",
+"top_k": 2, "experts": 25, "expert_width": 2432}`), `model_identity`,
+`source_leaves`, and `execution.edge_batch`. Resume accepts a JSON file only
+when implementation version 3, prompt/completion token IDs, row seed,
+checkpoint fingerprint, xLLM source commit, project commit, runtime, schedule,
+routing, recurrence count, prompt protocol, and `graph_config` all match. The
+edge-copy count is recorded in `execution` but is not resume identity, because
+copies only replicate rows.
+
+### Runtime build, smoke, and batch
+
+Build `xllm_extension` inside the pinned checkout with that checkout's own
+build step, in the same image as the GPU job; the mount check rejects an
+extension imported from outside the source tree. Then check mounts:
+
+```bash
+uv run python scripts/moe_huginn_mount_check.py \
+  --dataset /path/to/按任务 \
+  --model /path/to/LoopedLM-P1-moe-huginn-500b \
+  --xllm-source /path/to/xllm-loop \
+  --stage /path/to/staged/neuron-explorer \
+  --commit "$(git rev-parse HEAD)" \
+  --output-root /path/to/attribution/moe-huginn-500b
+```
+
+Run the one-condition smoke before any batch:
+
+```bash
+uv run python scripts/run_moe_huginn_attribution.py \
+  --model /path/to/LoopedLM-P1-moe-huginn-500b \
+  --xllm-source /path/to/xllm-loop \
+  --dataset /path/to/按任务 \
+  --output-root /path/to/attribution/moe-huginn-500b \
+  --commit "$(git rev-parse HEAD)" \
+  --device cuda --limit 1 --smoke
+```
+
+`--smoke` picks the shortest planned condition, builds it at `k=8`,
+`max_edges=40`, and one edge copy (ignoring `--k`/`--max-edges`), and writes
+`smoke.json` plus `smoke/output/{json,svg}/...`; it does not touch `output/`.
+It exits nonzero unless every gate passes: runtime identity, one MoE execution
+per schedule slot, one input injection per recurrence, routes (selected count,
+valid distinct IDs, weights summing to one within 0.01), stable recurrent
+shared IDs, logit equivalence, completion coverage, version-3 resume
+validation, and edge causality. Logit equivalence compares the patched forward
+with an explicit-attention control (`patched_vs_explicit_max_abs`) and reports
+the native FlashAttention difference (`native_vs_explicit_max_abs`)
+separately; the tolerance is the larger of the native difference and
+`2**-7 × max|logit|`. The report also records peak GPU bytes and seconds.
+
+The full batch:
+
+```bash
+uv run python scripts/run_moe_huginn_attribution.py \
+  --model /path/to/LoopedLM-P1-moe-huginn-500b \
+  --xllm-source /path/to/xllm-loop \
+  --dataset /path/to/按任务 \
+  --output-root /path/to/attribution/moe-huginn-500b \
+  --commit "$(git rev-parse HEAD)" \
+  --device cuda --benchmark-first
+```
+
+Defaults are `--k 512` and `--max-edges 3000`; `--limit N` caps rows per task.
+`--benchmark-first` builds the median-length condition with one edge copy,
+measures peak memory, and chooses direct-edge copies from the measured slots,
+capped at 4, then verifies that copy count on the same condition. An OOM halves
+copies first; only an OOM at one copy halves `k` (minimum 64) and `max_edges`
+(minimum 256), and that reduction is written to `output/benchmark.json`
+(`copy_reductions`, `fidelity_reductions`) and to every graph's
+`graph_config` (`fidelity_reduced`, `fidelity_note`). One model copy stays
+resident and graphs run serially. The benchmark also records frozen routes,
+the explicit attention kernel, and the applied edge-copy count. Any failed
+condition is listed in `output/summary.json` and makes the process exit 1.
+
+Outputs match Huginn-0125:
+`output/json/<task>/<sample>__<condition>.json`,
+`output/svg/<task>/<sample>__<condition>.svg`, `output/manifest.jsonl` (one
+record per task/row/condition), `output/progress.json`, `output/summary.json`,
+`output/benchmark.json`, and `logs/batch.log`.
+
+### Grouping MoE nodes across graphs
+
+Pick the identity that matches the question. Group by
+`(shared_weight_id, pos)` to pool one set of physical expert parameters at one
+token position across recurrent iterations, or by
+`(physical_layer, expert_id, expert_neuron)` to pool a physical expert neuron
+over positions. Add `virtual_depth` to keep recurrent executions separate.
+
+```python
+from collections import defaultdict
+from pathlib import Path
+from neuron_explorer.attribution import load_graph
+
+root = Path("/path/to/attribution/moe-huginn-500b/output/json")
+by_shared = defaultdict(float)
+by_expert = defaultdict(float)
+for path in sorted(root.rglob("*.json")):
+    graph = load_graph(path)
+    for node in graph["nodes"]:
+        if node["kind"] != "neuron":
+            continue
+        weight = float(node["influence"])
+        by_shared[(node["shared_weight_id"], node["pos"])] += weight
+        by_expert[
+            (node["physical_layer"], node["expert_id"], node["expert_neuron"])
+        ] += weight
+```
 
 ## Raw graph computation API
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -106,14 +107,20 @@ class MoESourceLeaf:
 
 @dataclass(frozen=True)
 class MoEContributions:
-    """Direct contributions; target indices address ``routed_neurons``."""
+    """Direct contributions; target indices address ``routed_neurons``.
+
+    ``routed_columns`` lists the routed-axis index of each ``routed`` column
+    when only selected sources were requested; ``None`` means every column.
+    ``routed_neurons`` may be a lazy sequence and must not be copied.
+    """
 
     routed: torch.Tensor
     token_embeddings: torch.Tensor
     source_contributions: torch.Tensor
     targets: torch.Tensor
-    routed_neurons: tuple[RoutedNeuron, ...]
+    routed_neurons: Sequence[RoutedNeuron]
     source_leaves: tuple[MoESourceLeaf, ...] = ()
+    routed_columns: tuple[int, ...] | None = None
 
     @property
     def state(self) -> torch.Tensor:

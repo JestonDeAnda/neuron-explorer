@@ -378,6 +378,41 @@ class XLLMHuginnLinearized:
         self._saved_requires_grad.clear()
         self._entered = False
 
+    def release(self) -> None:
+        """Drop every per-forward tensor and the replay cache."""
+        self._reset(replay=False)
+        self.logits = None
+        self.embedding_leaf = None
+        self.state_leaf = None
+        self._axis = None
+        self._routing_snapshot = None
+        self._token_ids = None
+        self._copies = 0
+
+    def explicit_attention_logits(self, token_ids: Sequence[int]) -> torch.Tensor:
+        """Native logits with only attention replaced by the explicit kernel.
+
+        This is the numerical control for the patched forward: nothing else is
+        frozen or detached, and no gradient is recorded.
+        """
+        if self._entered:
+            raise RuntimeError("exit the linearized context before the attention control")
+        if self.model.training:
+            raise RuntimeError("the xLLM model must be in eval mode")
+        device = next(self.model.parameters()).device
+        tokens = torch.tensor([[int(token) for token in token_ids]], device=device)
+        try:
+            for module in self.model.modules():
+                if isinstance(module, self._classes["attention"]):
+                    self._patch(module, _attention_forward)
+            self._reset(replay=False)
+            with torch.no_grad():
+                output = self.model(tokens, multi_segments=False)
+        finally:
+            self._restore()
+            self.release()
+        return output[0] if isinstance(output, tuple) else output
+
     def _patch(self, module: torch.nn.Module, function) -> None:
         self._saved.append(
             (module, "forward" in module.__dict__, module.__dict__.get("forward"))
@@ -583,9 +618,18 @@ class XLLMHuginnLinearized:
         targets: Sequence[int],
         completion_start: int,
         token_ids: Sequence[int],
+        *,
+        sources: Sequence[int] | None = None,
     ) -> MoEContributions:
-        """Attribute targets whose nonnegative indices address ``routed_neurons``."""
+        """Attribute targets whose nonnegative indices address ``routed_neurons``.
+
+        With ``sources``, gradients are taken only for the depths holding those
+        axis indices and only their columns are gathered.
+        """
         axis = self._require_forward(token_ids, mode="direct")
+        columns = None if sources is None else tuple(int(source) for source in sources)
+        if columns is not None and any(not 0 <= column < len(axis) for column in columns):
+            raise ValueError("a requested source column is outside the routed axis")
         requested = [int(target) for target in targets]
         if not requested:
             raise ValueError("at least one target is required")
@@ -603,24 +647,34 @@ class XLLMHuginnLinearized:
                 raise ValueError(f"target {target} is outside the routed axis")
         assert self.embedding_leaf is not None and self.state_leaf is not None
         records = self._ordered_records()
-        leaves = [record.leaf for record in records]
-        sources = [*leaves, self.embedding_leaf, self.state_leaf]
+        rows = len(requested)
+        if columns is None:
+            depths = list(range(len(records)))
+        else:
+            coordinates = [axis.coordinates(column) for column in columns]
+            depths = sorted({coordinate[0] for coordinate in coordinates})
+        leaves = [records[depth].leaf for depth in depths]
+        inputs = [*leaves, self.embedding_leaf, self.state_leaf]
         gradients = torch.autograd.grad(
-            torch.stack(scalars).sum(), sources, retain_graph=True, allow_unused=True
+            torch.stack(scalars).sum(), inputs, retain_graph=True, allow_unused=True
         )
         gradients = [
             torch.zeros_like(source) if grad is None else grad
-            for grad, source in zip(gradients, sources, strict=True)
+            for grad, source in zip(gradients, inputs, strict=True)
         ]
-        rows = len(requested)
-        routed = self._routed_rows(
-            records,
-            [
-                grad.float() * leaf.detach().float()
-                for grad, leaf in zip(gradients[:-2], leaves, strict=True)
-            ],
-            rows,
-        )
+        if columns is None:
+            routed = self._routed_rows(
+                records,
+                [
+                    grad.float() * leaf.detach().float()
+                    for grad, leaf in zip(gradients[:-2], leaves, strict=True)
+                ],
+                rows,
+            )
+        else:
+            routed = self._routed_columns(
+                dict(zip(depths, gradients[:-2], strict=True)), coordinates, rows
+            )
         embedding = (
             gradients[-2].float() * self.embedding_leaf.detach().float()
         ).sum(-1)[:rows]
@@ -634,7 +688,7 @@ class XLLMHuginnLinearized:
             token_embeddings=embedding.detach(),
             source_contributions=state.detach().unsqueeze(-1),
             targets=torch.stack([scalar.detach().float() for scalar in scalars]),
-            routed_neurons=axis,  # type: ignore[arg-type]
+            routed_neurons=axis,
             source_leaves=(
                 MoESourceLeaf(
                     "recurrent_state",
@@ -642,7 +696,35 @@ class XLLMHuginnLinearized:
                     metadata=(("state_init", self._state_init),),
                 ),
             ),
+            routed_columns=columns,
         )
+
+    def _routed_columns(
+        self,
+        gradients: Mapping[int, torch.Tensor],
+        coordinates: Sequence[tuple[int, int, int, int]],
+        rows: int,
+    ) -> torch.Tensor:
+        """Gather ``gradient * leaf`` for the requested axis coordinates only."""
+        assert self.embedding_leaf is not None
+        device = self.embedding_leaf.device
+        routed = torch.zeros(rows, len(coordinates), dtype=torch.float32, device=device)
+        by_depth: dict[int, list[tuple[int, int, int, int]]] = {}
+        for column, (depth, position, rank, neuron) in enumerate(coordinates):
+            by_depth.setdefault(depth, []).append((column, position, rank, neuron))
+        for depth, items in by_depth.items():
+            record = self._records[depth]
+            column, position, rank, neuron = (
+                torch.tensor(values, dtype=torch.long, device=device)
+                for values in zip(*items, strict=True)
+            )
+            grouped = record.order[:rows][:, position, rank]
+            neurons = neuron.expand_as(grouped)
+            values = gradients[depth][grouped, neurons].float() * (
+                record.leaf.detach()[grouped, neurons].float()
+            )
+            routed[:, column] = values
+        return routed
 
     def activations(self, neurons: Sequence[RoutedNeuron]) -> torch.Tensor:
         axis = self._require_forward()

@@ -206,8 +206,11 @@ class TinyEagerMoEBackend:
         targets: Sequence[int],
         completion_start: int,
         token_ids: Sequence[int],
+        *,
+        sources: Sequence[int] | None = None,
     ) -> MoEContributions:
         self._ensure_forward(token_ids)
+        columns = None if sources is None else tuple(int(source) for source in sources)
         assert self._leaf is not None
         assert self._embedding_leaf is not None
         assert self._state_leaf is not None
@@ -236,7 +239,8 @@ class TinyEagerMoEBackend:
                 embedding_gradient = torch.zeros_like(self._embedding_leaf)
             if state_gradient is None:
                 state_gradient = torch.zeros_like(self._state_leaf)
-            routed_rows.append((routed_gradient * self._leaf).detach())
+            routed_row = (routed_gradient * self._leaf).detach()
+            routed_rows.append(routed_row if columns is None else routed_row[list(columns)])
             embedding_rows.append(
                 (embedding_gradient * self._embedding_leaf).sum(-1).detach()
             )
@@ -250,6 +254,7 @@ class TinyEagerMoEBackend:
             targets=torch.stack([target.detach() for target in scalar_targets]),
             routed_neurons=self._neurons,
             source_leaves=(MoESourceLeaf("initial_state"),),
+            routed_columns=columns,
         )
 
     def activations(self, neurons: Sequence[RoutedNeuron]) -> torch.Tensor:

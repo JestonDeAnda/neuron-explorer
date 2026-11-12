@@ -1262,13 +1262,13 @@ class _Rope:
 class Huginn(nn.Module):
     def __init__(
         self, *, prelude: int = 1, recurrent: int = 2, coda: int = 1,
-        loops: int = 2, num_experts: int = 6, seed: int = 0,
+        loops: int = 2, num_experts: int = 6, inter_dim: int = 3, seed: int = 0,
     ) -> None:
         super().__init__()
         torch.manual_seed(seed)
         sizes = {
             "dim": 8, "n_heads": 4, "n_kv_heads": 2, "head_dim": 4,
-            "inter_dim": 3, "num_experts": num_experts, "topk": 2,
+            "inter_dim": inter_dim, "num_experts": num_experts, "topk": 2,
         }
         self.num_layers = prelude + recurrent + coda
         self.huginn_prelude_layers = prelude
@@ -1740,6 +1740,44 @@ def test_tiny_xllm_backend_builds_generic_graph() -> None:
     assert graph["metadata"]["model_identity"]["model_family"] == "xllm-huginn"
 
 
+def test_direct_targets_return_only_requested_source_columns() -> None:
+    _model, backend = _tiny_backend()
+    sources = [len(_TOKENS) * 2 * 3 * 5 + 4, 0, 17, 40]
+
+    with backend:
+        backend.forward(_TOKENS, mode="total")
+        backend.forward(_TOKENS, copies=2, replay=True, mode="direct")
+        full = backend.direct_targets([7, -1], 3, _TOKENS)
+        selected = backend.direct_targets([7, -1], 3, _TOKENS, sources=sources)
+
+    assert full.routed_columns is None
+    assert selected.routed_columns == tuple(sources)
+    assert selected.routed.shape == (2, len(sources))
+    torch.testing.assert_close(selected.routed, full.routed[:, sources])
+    torch.testing.assert_close(selected.token_embeddings, full.token_embeddings)
+    torch.testing.assert_close(
+        selected.source_contributions, full.source_contributions
+    )
+    torch.testing.assert_close(selected.targets, full.targets)
+
+
+def test_tiny_xllm_graph_never_iterates_the_routed_axis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from neuron_explorer.attribution.moe.xllm_huginn import linearized
+
+    def refuse(self):
+        raise AssertionError("the routed axis was iterated")
+
+    monkeypatch.setattr(linearized._RoutedAxis, "__iter__", refuse)
+    _model, backend = _tiny_backend()
+
+    with backend:
+        graph = build_moe_graph(backend, _TOKENS, 3, k=12, batch=4, max_edges=200)
+
+    assert any(node["kind"] == "neuron" for node in graph["nodes"])
+
+
 def test_context_exit_restores_forwards_and_requires_grad_after_success() -> None:
     model, backend = _tiny_backend()
     model.layers[0].moe.experts.weight1.requires_grad_(False)
@@ -1855,3 +1893,550 @@ def test_importing_linearized_does_not_import_xllm() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+# Graph runner, resume, manifest, benchmark, and smoke contracts.
+
+_ROUTING = {
+    "frozen": True,
+    "score": "sigmoid",
+    "normalization": "selected_sum",
+    "top_k": 2,
+    "experts": 25,
+    "expert_width": 2432,
+}
+_CONDITIONS = {"clean_correct", "clean_incorrect", "corrupted_correct", "corrupted_incorrect"}
+
+
+class _TinyTokenizer:
+    bos_token_id = 0
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        assert add_special_tokens is False
+        return [1 + ord(char) % 16 for char in text]
+
+
+def _dataset_row(index: int = 1) -> dict[str, str]:
+    return {
+        "id": f"Tiny/agreement:{index}",
+        "prompt_variant": "native_bos",
+        "clean": "ab",
+        "corrupted": "ba",
+        "correct": " c",
+        "incorrect": " d",
+        "corrupted_correct": " d",
+        "corrupted_incorrect": " c",
+    }
+
+
+def _runner_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides):
+    from neuron_explorer.attribution.moe.xllm_huginn import runner
+
+    dataset = tmp_path / "dataset"
+    dataset.mkdir(exist_ok=True)
+    (dataset / "00_tiny.jsonl").write_text(
+        json.dumps(_dataset_row()) + "\n", encoding="utf-8"
+    )
+    model = Huginn(num_experts=overrides.pop("num_experts", 25), inter_dim=2432).eval()
+    loads: list[tuple[str, str, str]] = []
+
+    def fake_load(model_path, source_path, device):
+        loads.append((str(model_path), str(source_path), device))
+        return (
+            _TinyTokenizer(),
+            model,
+            _tiny_config(model),
+            "checkpoint-sha256:tiny",
+            XLLM_SOURCE_COMMIT,
+        )
+
+    monkeypatch.setattr(runner, "load_xllm_huginn", fake_load)
+    values = {
+        "model": str(tmp_path / "model"),
+        "xllm_source": str(tmp_path / "xllm"),
+        "dataset": str(dataset),
+        "output_root": str(tmp_path / "out"),
+        "commit": "project-commit",
+        "device": "cpu",
+        "k": 8,
+        "max_edges": 60,
+        "benchmark_first": False,
+        "limit": 0,
+        "smoke": False,
+    }
+    values.update(overrides)
+    return runner, SimpleNamespace(**values), model, loads
+
+
+def _graph_files(args: SimpleNamespace) -> dict[str, Path]:
+    from neuron_explorer.attribution.huginn.batch import graph_paths
+
+    return {
+        condition: graph_paths(
+            Path(args.output_root), "00_tiny", _dataset_row()["id"], condition
+        )[0]
+        for condition in _CONDITIONS
+    }
+
+
+def _count_builds(runner, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    calls: list[dict[str, object]] = []
+    original = runner.build_xllm_huginn_graph
+
+    def counted(backend, token_ids, completion_start, **kwargs):
+        calls.append(kwargs)
+        return original(backend, token_ids, completion_start, **kwargs)
+
+    monkeypatch.setattr(runner, "build_xllm_huginn_graph", counted)
+    return calls
+
+
+def _manifest(args: SimpleNamespace) -> list[dict[str, object]]:
+    path = Path(args.output_root) / "output" / "manifest.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _native_completion_logprob(model: Huginn, tokens, completion_start: int) -> float:
+    logits = _native_logits(model, tokens)[0]
+    return float(
+        sum(
+            torch.log_softmax(logits[position - 1].float(), -1)[tokens[position]]
+            for position in range(completion_start, len(tokens))
+        )
+    )
+
+
+def test_xllm_graph_target_covers_every_continuation_token() -> None:
+    from neuron_explorer.attribution.moe.xllm_huginn import build_xllm_huginn_graph
+
+    model, backend = _tiny_backend()
+
+    graph = build_xllm_huginn_graph(backend, _TOKENS, 2, k=12, batch=4, max_edges=200)
+
+    logit = next(node for node in graph["nodes"] if node["kind"] == "logit")
+    assert graph["target"]["kind"] == "completion_logprob"
+    assert graph["completion_token_ids"] == _TOKENS[2:]
+    assert logit["target_token_ids"] == _TOKENS[2:]
+    assert logit["prediction_positions"] == [1, 2, 3]
+    assert graph["stats"]["completion_tokens"] == 3
+    assert graph["completion_logprob"] == pytest.approx(
+        _native_completion_logprob(model, _TOKENS, 2), abs=1e-4
+    )
+
+
+def test_xllm_graph_restores_model_and_releases_forward_tensors() -> None:
+    from neuron_explorer.attribution.moe.xllm_huginn import build_xllm_huginn_graph
+
+    model, backend = _tiny_backend()
+
+    build_xllm_huginn_graph(backend, _TOKENS, 2, k=6, batch=2, max_edges=50)
+
+    assert _patched_forwards(model) == []
+    assert backend.logits is None
+    assert backend.embedding_leaf is None and backend.state_leaf is None
+    assert backend._records == {} and backend._cache == {}
+    with pytest.raises(RuntimeError, match="forward"):
+        backend.routed_neurons()
+
+
+def test_xllm_graph_expert_nodes_carry_design_identity() -> None:
+    from neuron_explorer.attribution.moe.xllm_huginn import build_xllm_huginn_graph
+
+    _model, backend = _tiny_backend()
+    with backend:
+        backend.forward(_TOKENS, mode="total")
+        snapshot = backend.routing_snapshot
+
+    graph = build_xllm_huginn_graph(backend, _TOKENS, 2, k=40, batch=8, max_edges=400)
+
+    neurons = [node for node in graph["nodes"] if node["kind"] == "neuron"]
+    assert neurons
+    width = backend.identity.expert_width
+    for node in neurons:
+        slot = backend.schedule[node["virtual_depth"]]
+        assert node["layer"] == node["virtual_depth"]
+        assert (
+            node["stage"],
+            node["recurrence_iteration"],
+            node["physical_layer"],
+            node["physical_block"],
+        ) == (
+            slot.stage,
+            slot.recurrence_iteration,
+            slot.physical_layer,
+            slot.physical_block,
+        )
+        assert 0 <= node["expert_id"] < 6 and 0 <= node["expert_neuron"] < width
+        assert node["n"] == node["expert_id"] * width + node["expert_neuron"]
+        assert node["physical_neuron"] == node["n"]
+        assert node["runtime_expert_id"] == node["expert_id"]
+        assert node["expert_kind"] == "routed"
+        assert node["shared_weight_id"] == (
+            f"{slot.stage}:{slot.physical_block}:"
+            f"e{node['expert_id']}:n{node['expert_neuron']}"
+        )
+        depth, position, rank = node["virtual_depth"], node["pos"], node["router_rank"]
+        assert node["expert_id"] == int(snapshot.selected_experts[depth, position, rank])
+        assert node["routing_weight"] == pytest.approx(
+            float(snapshot.routing_weights[depth, position, rank])
+        )
+    recurrent_blocks: dict[int, set[int]] = {}
+    for slot in backend.schedule:
+        if slot.stage == "recurrent":
+            recurrent_blocks.setdefault(slot.physical_layer, set()).add(slot.physical_block)
+    assert all(len(blocks) == 1 for blocks in recurrent_blocks.values())
+
+
+def test_xllm_graph_records_routes_without_router_nodes() -> None:
+    from neuron_explorer.attribution.moe.xllm_huginn import build_xllm_huginn_graph
+
+    _model, backend = _tiny_backend()
+
+    graph = build_xllm_huginn_graph(backend, _TOKENS, 2, k=20, batch=4, max_edges=200)
+
+    assert {node["kind"] for node in graph["nodes"]} <= {"neuron", "embed", "logit"}
+    assert not any(
+        "router" in str(node.get("source_kind", "")) for node in graph["nodes"]
+    )
+    for node in graph["nodes"]:
+        if node["kind"] == "neuron":
+            assert node["router_rank"] in {0, 1}
+            assert 0.0 < node["routing_weight"] <= 1.0
+    auxiliary = graph["metadata"]["model_identity"]["auxiliary"]
+    assert auxiliary["routing"] == "frozen_topk_ids_and_weights"
+
+
+def test_runner_graph_metadata_is_version_three_with_runtime_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from neuron_explorer.attribution.huginn.batch import json_is_complete
+    from neuron_explorer.attribution.schema import load_graph
+
+    runner, args, model, loads = _runner_fixture(tmp_path, monkeypatch)
+
+    assert runner.execute(args) == 0
+
+    assert loads == [(args.model, args.xllm_source, "cpu")]
+    assert runner.ROUTING_METADATA == _ROUTING
+    schedule = [slot.as_dict() for slot in execution_schedule(_tiny_config(model))]
+    for path in _graph_files(args).values():
+        graph = load_graph(path)
+        metadata = graph["metadata"]
+        assert metadata["attribution_implementation_version"] == 3
+        assert metadata["runtime"] == "xllm"
+        assert metadata["xllm_source_commit"] == XLLM_SOURCE_COMMIT
+        assert metadata["schedule"] == schedule
+        assert metadata["routing"] == _ROUTING
+        assert metadata["model_revision"] == "checkpoint-sha256:tiny"
+        assert metadata["code_commit"] == "project-commit"
+        assert metadata["recurrence_count"] == 2
+        assert metadata["graph_config"]["k"] == 8
+        assert metadata["graph_config"]["max_edges"] == 60
+        assert json_is_complete(path)
+        assert path.with_suffix(".svg").name in {
+            svg.name for svg in Path(args.output_root).rglob("*.svg")
+        }
+
+
+def _set_metadata(key: str, value: object):
+    def mutate(metadata: dict[str, object]) -> None:
+        metadata[key] = value
+
+    return mutate
+
+
+def _truncate_schedule(metadata: dict[str, object]) -> None:
+    metadata["schedule"] = list(metadata["schedule"])[:-1]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        _set_metadata("runtime", "transformers"),
+        _set_metadata("xllm_source_commit", "0" * 40),
+        _truncate_schedule,
+        _set_metadata("model_revision", "checkpoint-sha256:other"),
+        _set_metadata("routing", {**_ROUTING, "frozen": False}),
+    ],
+    ids=["runtime", "source", "schedule", "checkpoint", "routing"],
+)
+def test_resume_requires_runtime_source_and_schedule_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutate
+) -> None:
+    from neuron_explorer.attribution.schema import load_graph, save_graph
+
+    runner, args, _model, _loads = _runner_fixture(tmp_path, monkeypatch)
+    assert runner.execute(args) == 0
+    stale = _graph_files(args)["clean_incorrect"]
+    graph = load_graph(stale)
+    mutate(graph["metadata"])
+    save_graph(graph, stale)
+    builds = _count_builds(runner, monkeypatch)
+
+    assert runner.execute(args) == 0
+
+    assert len(builds) == 1
+    rebuilt = load_graph(stale)["metadata"]
+    assert rebuilt["runtime"] == "xllm"
+    assert rebuilt["xllm_source_commit"] == XLLM_SOURCE_COMMIT
+    assert rebuilt["routing"] == _ROUTING
+    assert rebuilt["model_revision"] == "checkpoint-sha256:tiny"
+
+
+def test_resume_keeps_current_graphs_without_rebuilding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, args, _model, _loads = _runner_fixture(tmp_path, monkeypatch)
+    assert runner.execute(args) == 0
+    builds = _count_builds(runner, monkeypatch)
+
+    assert runner.execute(args) == 0
+
+    assert builds == []
+
+
+def test_resume_rebuilds_stale_dense_version_two_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from neuron_explorer.attribution.schema import load_graph, save_graph
+
+    runner, args, _model, _loads = _runner_fixture(tmp_path, monkeypatch)
+    assert runner.execute(args) == 0
+    stale = _graph_files(args)["corrupted_correct"]
+    graph = load_graph(stale)
+    for key in ("runtime", "xllm_source_commit", "schedule", "routing"):
+        graph["metadata"].pop(key)
+    graph["metadata"]["attribution_implementation_version"] = 2
+    save_graph(graph, stale)
+    builds = _count_builds(runner, monkeypatch)
+
+    assert runner.execute(args) == 0
+
+    assert len(builds) == 1
+    assert load_graph(stale)["metadata"]["attribution_implementation_version"] == 3
+
+
+def test_resume_regenerates_missing_svg_without_invoking_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from neuron_explorer.attribution.huginn.batch import graph_paths
+
+    runner, args, _model, _loads = _runner_fixture(tmp_path, monkeypatch)
+    assert runner.execute(args) == 0
+    _json, svg = graph_paths(
+        Path(args.output_root), "00_tiny", _dataset_row()["id"], "clean_correct"
+    )
+    svg.unlink()
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("the backend ran for a complete graph")
+
+    monkeypatch.setattr(XLLMHuginnLinearized, "forward", refuse)
+
+    assert runner.execute(args) == 0
+    assert svg.is_file() and "<svg" in svg.read_text(encoding="utf-8")[:200]
+
+
+def test_manifest_has_one_unique_record_per_condition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from neuron_explorer.attribution.huginn.batch import graph_paths
+
+    runner, args, _model, _loads = _runner_fixture(tmp_path, monkeypatch)
+    assert runner.execute(args) == 0
+    assert runner.execute(args) == 0
+    graph_paths(
+        Path(args.output_root), "00_tiny", _dataset_row()["id"], "clean_incorrect"
+    )[1].unlink()
+    assert runner.execute(args) == 0
+
+    records = _manifest(args)
+    keys = [(r["task_slug"], r["row_id"], r["condition"]) for r in records]
+    assert len(keys) == len(set(keys)) == 4
+    assert {key[2] for key in keys} == _CONDITIONS
+
+
+def test_runner_graph_failure_exits_nonzero_and_is_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, args, _model, _loads = _runner_fixture(tmp_path, monkeypatch)
+    original = runner.build_xllm_huginn_graph
+
+    def fail_one(backend, token_ids, completion_start, **kwargs):
+        if kwargs["metadata"]["condition"] == "corrupted_incorrect":
+            raise ValueError("synthetic graph failure")
+        return original(backend, token_ids, completion_start, **kwargs)
+
+    monkeypatch.setattr(runner, "build_xllm_huginn_graph", fail_one)
+
+    assert runner.execute(args) == 1
+
+    summary = json.loads(
+        (Path(args.output_root) / "output" / "summary.json").read_text(encoding="utf-8")
+    )
+    assert [item["condition"] for item in summary["failed"]] == ["corrupted_incorrect"]
+    assert len(_manifest(args)) == 3
+
+
+def test_runner_rejects_model_outside_pinned_routing_graph_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, args, _model, _loads = _runner_fixture(tmp_path, monkeypatch, num_experts=6)
+    builds = _count_builds(runner, monkeypatch)
+
+    with pytest.raises(RuntimeError, match="routing"):
+        runner.execute(args)
+
+    assert builds == []
+    assert not (Path(args.output_root) / "output" / "manifest.jsonl").exists()
+
+
+def _benchmark(args: SimpleNamespace) -> dict[str, object]:
+    path = Path(args.output_root) / "output" / "benchmark.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_benchmark_records_frozen_routes_attention_one_model_and_edge_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from neuron_explorer.attribution.schema import load_graph
+
+    runner, args, _model, _loads = _runner_fixture(
+        tmp_path, monkeypatch, benchmark_first=True
+    )
+    monkeypatch.setattr(runner, "_peak_memory", lambda device: 10)
+    monkeypatch.setattr(runner, "_device_memory", lambda device: 100)
+    builds = _count_builds(runner, monkeypatch)
+
+    assert runner.execute(args) == 0
+
+    benchmark = _benchmark(args)
+    assert benchmark["frozen_routes"] is True
+    assert benchmark["routing"] == _ROUTING
+    assert benchmark["attention"] == "explicit_causal_fp32_frozen_pattern"
+    assert benchmark["model_copies"] == 1
+    assert benchmark["measured_edge_batch"] == 1
+    assert benchmark["applied_edge_batch"] == 4
+    assert benchmark["copy_reductions"] == []
+    assert benchmark["fidelity_reductions"] == []
+    assert (benchmark["requested_k"], benchmark["k"]) == (8, 8)
+    assert (benchmark["requested_max_edges"], benchmark["max_edges"]) == (60, 60)
+    assert benchmark["peak_bytes"] == 10 and benchmark["device_bytes"] == 100
+    assert [call["batch"] for call in builds[:2]] == [1, 4]
+    assert all(call["batch"] == 4 for call in builds[2:])
+    for path in _graph_files(args).values():
+        metadata = load_graph(path)["metadata"]
+        assert metadata["execution"]["edge_batch"] == 4
+        assert metadata["graph_config"]["fidelity_reduced"] is False
+
+
+def test_benchmark_oom_reduces_edge_copies_before_k(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, args, _model, _loads = _runner_fixture(
+        tmp_path, monkeypatch, benchmark_first=True
+    )
+    monkeypatch.setattr(runner, "_peak_memory", lambda device: 10)
+    monkeypatch.setattr(runner, "_device_memory", lambda device: 100)
+    original = runner.build_xllm_huginn_graph
+
+    def limited(backend, token_ids, completion_start, **kwargs):
+        if kwargs["batch"] > 2:
+            raise torch.OutOfMemoryError("CUDA out of memory")
+        return original(backend, token_ids, completion_start, **kwargs)
+
+    monkeypatch.setattr(runner, "build_xllm_huginn_graph", limited)
+
+    assert runner.execute(args) == 0
+
+    benchmark = _benchmark(args)
+    assert benchmark["applied_edge_batch"] == 2
+    assert benchmark["copy_reductions"] == [{"from": 4, "to": 2}]
+    assert benchmark["fidelity_reductions"] == []
+    assert benchmark["k"] == 8 and benchmark["max_edges"] == 60
+
+
+def test_benchmark_oom_at_one_copy_records_reduced_k_and_max_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from neuron_explorer.attribution.schema import load_graph
+
+    runner, args, _model, _loads = _runner_fixture(
+        tmp_path, monkeypatch, benchmark_first=True, k=128, max_edges=600
+    )
+    original = runner.build_xllm_huginn_graph
+
+    def limited(backend, token_ids, completion_start, **kwargs):
+        if kwargs["k"] > 64:
+            raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+        return original(backend, token_ids, completion_start, **kwargs)
+
+    monkeypatch.setattr(runner, "build_xllm_huginn_graph", limited)
+
+    assert runner.execute(args) == 0
+
+    benchmark = _benchmark(args)
+    assert benchmark["applied_edge_batch"] == 1
+    assert benchmark["copy_reductions"] == []
+    assert benchmark["fidelity_reductions"] == [
+        {"from_k": 128, "to_k": 64, "from_max_edges": 600, "to_max_edges": 300}
+    ]
+    assert (benchmark["requested_k"], benchmark["k"]) == (128, 64)
+    assert (benchmark["requested_max_edges"], benchmark["max_edges"]) == (600, 300)
+    for path in _graph_files(args).values():
+        config = load_graph(path)["metadata"]["graph_config"]
+        assert (config["k"], config["max_edges"]) == (64, 300)
+        assert config["fidelity_reduced"] is True
+        assert "k=64" in config["fidelity_note"]
+
+
+def test_benchmark_non_oom_error_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, args, _model, _loads = _runner_fixture(
+        tmp_path, monkeypatch, benchmark_first=True
+    )
+
+    def broken(*_args, **_kwargs):
+        raise ValueError("not a memory problem")
+
+    monkeypatch.setattr(runner, "build_xllm_huginn_graph", broken)
+
+    with pytest.raises(ValueError, match="memory problem"):
+        runner.execute(args)
+
+
+def test_smoke_writes_gated_report_and_skips_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from neuron_explorer.attribution.huginn.batch import json_is_complete
+
+    runner, args, _model, _loads = _runner_fixture(tmp_path, monkeypatch, smoke=True)
+
+    assert runner.execute(args) == 0
+
+    report = json.loads((Path(args.output_root) / "smoke.json").read_text("utf-8"))
+    gates = {gate["name"]: gate for gate in report["gates"]}
+    assert report["ok"] is True
+    assert all(gate["ok"] for gate in gates.values())
+    assert {
+        "runtime_identity",
+        "moe_executions",
+        "recurrent_injections",
+        "routes",
+        "recurrent_shared_ids",
+        "logit_equivalence",
+        "completion_coverage",
+        "graph_version_3",
+        "edge_causality",
+    } <= set(gates)
+    assert gates["moe_executions"]["observed"] == 6
+    assert gates["recurrent_injections"]["observed"] == 2
+    assert report["graph_config"]["k"] == 8
+    assert report["graph_config"]["max_edges"] == 40
+    assert report["edge_batch"] == 1
+    assert report["checkpoint_fingerprint"] == "checkpoint-sha256:tiny"
+    assert report["xllm_source_commit"] == XLLM_SOURCE_COMMIT
+    assert "seconds_per_graph" in report and "peak_bytes" in report
+    assert json_is_complete(Path(report["graph_json"]))
+    assert not (Path(args.output_root) / "output" / "manifest.jsonl").exists()
