@@ -25,11 +25,28 @@ def execution_schedule(config: Mapping[str, Any]) -> tuple[MoEExecutionSlot, ...
             f"got {hierarchical_state!r}"
         )
 
-    prelude = int(model["huginn_prelude_layers"])
-    recurrent = int(model["huginn_recurrent_layers"])
-    coda = int(model["huginn_coda_layers"])
-    recurrences = int(model["loop_times"])
-    num_layers = int(model["num_layers"])
+    names = (
+        "huginn_prelude_layers",
+        "huginn_recurrent_layers",
+        "huginn_coda_layers",
+        "loop_times",
+        "num_layers",
+    )
+    try:
+        values = {name: model[name] for name in names}
+    except KeyError as exc:
+        raise ValueError(f"invalid xLLM Huginn schedule: missing {exc.args[0]}") from exc
+    invalid = [name for name, value in values.items() if type(value) is not int]
+    if invalid:
+        raise ValueError(
+            "invalid xLLM Huginn schedule: integer values required for "
+            + ", ".join(invalid)
+        )
+    prelude = values["huginn_prelude_layers"]
+    recurrent = values["huginn_recurrent_layers"]
+    coda = values["huginn_coda_layers"]
+    recurrences = values["loop_times"]
+    num_layers = values["num_layers"]
     if min(prelude, recurrent, coda, recurrences) < 0:
         raise ValueError("Huginn schedule sizes must be non-negative")
     if prelude + recurrent + coda != num_layers:

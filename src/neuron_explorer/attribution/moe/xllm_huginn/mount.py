@@ -11,6 +11,7 @@ from typing import Any
 
 from neuron_explorer.attribution.moe.xllm_huginn.runtime import (
     XLLM_SOURCE_COMMIT,
+    _fingerprinted_files,
     verify_xllm_source,
 )
 
@@ -42,7 +43,7 @@ def _dataset_checks(dataset: Path, expected_tasks: int, expected_rows: int):
             rows == expected_rows,
             f"expected {expected_rows}, found {rows}",
         )
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         yield _check("dataset_rows", False, f"cannot read dataset: {exc}")
 
 
@@ -101,6 +102,7 @@ def _manifest_check(model: Path) -> dict[str, Any]:
         entries = manifest["files"]
         if not isinstance(entries, list) or not entries:
             raise ValueError("files must be a non-empty list")
+        listed: set[str] = set()
         for entry in entries:
             relative_text = entry["path"]
             if not isinstance(relative_text, str) or not relative_text:
@@ -112,14 +114,38 @@ def _manifest_check(model: Path) -> dict[str, Any]:
                 or relative.as_posix() != relative_text
             ):
                 raise ValueError(f"artifact path escapes checkpoint: {relative_text}")
+            if relative_text in listed:
+                raise ValueError(f"duplicate artifact path: {relative_text}")
+            listed.add(relative_text)
             artifact = model / relative
             if artifact.is_symlink():
                 raise ValueError(f"artifact path is a symlink: {relative_text}")
-            data = artifact.read_bytes()
-            if len(data) != int(entry["size_bytes"]):
+            expected_size = int(entry["size_bytes"])
+            if artifact.stat().st_size != expected_size:
                 raise ValueError(f"size mismatch: {entry['path']}")
-            if hashlib.sha256(data).hexdigest() != entry["sha256"]:
+            digest = hashlib.sha256()
+            with artifact.open("rb") as handle:
+                while chunk := handle.read(8 * 1024 * 1024):
+                    digest.update(chunk)
+            if digest.hexdigest() != entry["sha256"]:
                 raise ValueError(f"SHA-256 mismatch: {entry['path']}")
+        fingerprint_inputs = {
+            path.relative_to(model).as_posix()
+            for path in _fingerprinted_files(model)
+            if path.name != "artifact_manifest.json"
+        }
+        unlisted = sorted(fingerprint_inputs - listed)
+        if unlisted:
+            raise ValueError(f"unlisted fingerprint inputs: {unlisted}")
+        index = json.loads(
+            (model / "model.safetensors.index.json").read_text(encoding="utf-8")
+        )
+        weight_map = index["weight_map"]
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError("checkpoint weight_map must be a non-empty object")
+        for shard in set(weight_map.values()):
+            if not isinstance(shard, str) or not (model / shard).is_file():
+                raise ValueError(f"weight-map shard missing: {shard!r}")
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return _check("artifact_manifest", False, f"manifest verification failed: {exc}")
     return _check(
@@ -132,11 +158,26 @@ def _manifest_check(model: Path) -> dict[str, Any]:
 def _runtime_checks(source: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     try:
         extension = import_module("xllm_extension")
-    except (ImportError, OSError) as exc:
+    except Exception as exc:
         extension_check = _check("xllm_extension", False, f"import failed: {exc}")
         extension = None
     else:
-        extension_check = _check("xllm_extension", True, "imported xllm_extension")
+        extension_file = getattr(extension, "__file__", None)
+        try:
+            Path(extension_file).resolve().relative_to(source.resolve())
+        except (OSError, TypeError, ValueError):
+            extension_check = _check(
+                "xllm_extension",
+                False,
+                f"extension outside pinned source: {extension_file!r}",
+            )
+            extension = None
+        else:
+            extension_check = _check(
+                "xllm_extension",
+                True,
+                f"imported pinned extension: {extension_file}",
+            )
 
     source_api = (
         source
