@@ -3,11 +3,12 @@
 Graphs reuse the dense Huginn four-condition planner, output layout, and resume
 writer with implementation version 3 and the xLLM runtime identity. One model
 copy stays resident; the benchmark spends measured memory on direct-edge
-replica rows only. Importing this module does not import xLLM.
+copies only. Importing this module does not import xLLM.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
 import os
@@ -48,7 +49,8 @@ MIN_K = 64
 MIN_MAX_EDGES = 256
 SMOKE_K = 8
 SMOKE_MAX_EDGES = 40
-BF16_EPSILON = 2.0**-7
+NATIVE_ATTENTION_RELATIVE_TOLERANCE = 2.0**-7
+PATCHED_RELATIVE_TOLERANCE = 2.0**-9
 ATTENTION = "explicit_causal_fp32_frozen_pattern"
 ROUTING_METADATA = {
     "frozen": True,
@@ -90,6 +92,44 @@ def build_xllm_huginn_graph(
         backend.release()
 
 
+class PromptTokenizer:
+    """Planner view of a native tokenizer.
+
+    Exposes ``bos_token_id`` (from ``bos_id`` when needed) and an ``encode``
+    that never lets the native encoder add BOS/EOS; the prompt protocol alone
+    decides whether one BOS is prepended.
+    """
+
+    def __init__(self, native: Any) -> None:
+        bos = getattr(native, "bos_token_id", None)
+        if bos is None:
+            bos = getattr(native, "bos_id", None)
+        if callable(bos):
+            bos = bos()
+        if bos is None:
+            raise ValueError("native tokenizer exposes neither bos_token_id nor bos_id")
+        self.native = native
+        self.bos_token_id = int(bos)
+        self._options = _no_special_token_options(native.encode)
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        if add_special_tokens:
+            raise ValueError("PromptTokenizer never adds special tokens")
+        return [int(token) for token in self.native.encode(text, **self._options)]
+
+
+def _no_special_token_options(encode: Any) -> dict[str, bool]:
+    try:
+        parameters = inspect.signature(encode).parameters
+    except (TypeError, ValueError):
+        return {}
+    if "add_special_tokens" in parameters:
+        return {"add_special_tokens": False}
+    return {
+        name: False for name in ("bos", "eos", "add_bos", "add_eos") if name in parameters
+    }
+
+
 @dataclass(frozen=True)
 class _Run:
     model_path: str
@@ -118,11 +158,14 @@ def _routing_contract(identity: MoEModelIdentity) -> dict[str, Any]:
     return dict(ROUTING_METADATA)
 
 
-def _graph_config(k: int, max_edges: int, fidelity_note: str | None) -> dict[str, Any]:
-    """Resume identity. Edge-copy count only replicates rows, so it is excluded."""
+def _graph_config(
+    k: int, max_edges: int, batch: int, fidelity_note: str | None
+) -> dict[str, Any]:
+    """Full graph configuration and resume identity, including edge copies."""
     config: dict[str, Any] = {
         "k": int(k),
         "max_edges": int(max_edges),
+        "batch": int(batch),
         "node_threshold": NODE_THRESHOLD,
         "edge_threshold": EDGE_THRESHOLD,
         "target": "teacher_forced_completion_logprob",
@@ -159,7 +202,6 @@ def _build_job(
     job: GraphJob,
     run: _Run,
     graph_config: Mapping[str, Any],
-    edge_batch: int,
 ) -> dict[str, Any]:
     torch.manual_seed(job.seed)
     return build_xllm_huginn_graph(
@@ -167,14 +209,11 @@ def _build_job(
         job.token_ids,
         job.completion_start,
         k=int(graph_config["k"]),
-        batch=int(edge_batch),
+        batch=int(graph_config["batch"]),
         node_threshold=float(graph_config["node_threshold"]),
         edge_threshold=float(graph_config["edge_threshold"]),
         max_edges=int(graph_config["max_edges"]),
-        metadata={
-            **_job_metadata(job, run, graph_config),
-            "execution": {"edge_batch": int(edge_batch), "model_copies": 1},
-        },
+        metadata=_job_metadata(job, run, graph_config),
     )
 
 
@@ -257,7 +296,7 @@ def _benchmark(
         started = time.perf_counter()
         try:
             graph = _build_job(
-                backend, sample, run, _graph_config(k, max_edges, fidelity_note), batch
+                backend, sample, run, _graph_config(k, max_edges, batch, fidelity_note)
             )
         except Exception as exc:
             if not _is_oom(exc):
@@ -373,6 +412,71 @@ def _max_abs(left: torch.Tensor, right: torch.Tensor) -> float:
     return float((left.float() - right.float()).abs().max())
 
 
+def _native_logits(model: Any, ids: Sequence[int]) -> torch.Tensor:
+    device = next(model.parameters()).device
+    tokens = torch.tensor([list(ids)], device=device)
+    with torch.no_grad():
+        output = model(tokens, multi_segments=False)
+    return (output[0] if isinstance(output, tuple) else output)[0].detach()
+
+
+def _logit_gates(
+    native: torch.Tensor, explicit: torch.Tensor, patched: torch.Tensor
+) -> list[dict[str, Any]]:
+    """Gate native attention and the patched forward against the explicit control.
+
+    Both bounds are fixed fractions of the control's logit scale, so a large
+    native kernel gap can never loosen the patched-forward bound.
+    """
+    differences = {
+        "patched_vs_explicit_max_abs": _max_abs(patched, explicit),
+        "native_vs_explicit_max_abs": _max_abs(native, explicit),
+        "patched_vs_native_max_abs": _max_abs(patched, native),
+    }
+    scale = float(explicit.float().abs().max())
+    native_tolerance = NATIVE_ATTENTION_RELATIVE_TOLERANCE * scale
+    patched_tolerance = PATCHED_RELATIVE_TOLERANCE * scale
+
+    def within(value: float, tolerance: float) -> bool:
+        return math.isfinite(value) and value <= tolerance
+
+    return [
+        _gate(
+            "native_attention_control",
+            within(differences["native_vs_explicit_max_abs"], native_tolerance),
+            tolerance=native_tolerance,
+            tolerance_rule="2**-7 * max|explicit logits|",
+            dtype=str(explicit.dtype),
+            **differences,
+        ),
+        _gate(
+            "logit_equivalence",
+            within(differences["patched_vs_explicit_max_abs"], patched_tolerance),
+            tolerance=patched_tolerance,
+            tolerance_rule="2**-9 * max|explicit logits|",
+            dtype=str(explicit.dtype),
+            **differences,
+        ),
+    ]
+
+
+def _leading_bos_gate(job: GraphJob, bos: int) -> dict[str, Any]:
+    ids = list(job.token_ids)
+    leading = 0
+    while leading < len(ids) and ids[leading] == bos:
+        leading += 1
+    expected = 1 if job.prompt_protocol.get("native_bos") else 0
+    inner = ids[leading:].count(bos)
+    return _gate(
+        "single_leading_bos",
+        leading == expected and inner == 0,
+        leading_bos=leading,
+        expected_leading_bos=expected,
+        inner_bos=inner,
+        bos_token_id=bos,
+    )
+
+
 def _tokenizer_length(tokenizer: Any) -> int | None:
     for candidate in (tokenizer, getattr(tokenizer, "_tokenizer", None)):
         try:
@@ -403,7 +507,7 @@ def _edge_causality(graph: Mapping[str, Any]) -> list[list[Any]]:
 def _smoke(
     backend: XLLMHuginnLinearized,
     model: Any,
-    tokenizer: Any,
+    tokenizer: PromptTokenizer,
     planned: Sequence[GraphJob],
     run: _Run,
     args,
@@ -426,11 +530,7 @@ def _smoke(
         )
     )
 
-    device = next(model.parameters()).device
-    tokens = torch.tensor([list(ids)], device=device)
-    with torch.no_grad():
-        native = model(tokens, multi_segments=False)
-    native = (native[0] if isinstance(native, tuple) else native)[0].detach()
+    native = _native_logits(model, ids)
     explicit = backend.explicit_attention_logits(ids)[0].detach()
 
     injections = 0
@@ -495,25 +595,14 @@ def _smoke(
         shared_ok &= len(identities) == 1 and iterations == list(range(recurrence))
     gates.append(_gate("recurrent_shared_ids", shared_ok, recurrent_layers=len(recurrent)))
 
-    patched_vs_explicit = _max_abs(patched, explicit)
-    native_vs_explicit = _max_abs(native, explicit)
-    tolerance = max(native_vs_explicit, BF16_EPSILON * float(explicit.float().abs().max()))
-    gates.append(
-        _gate(
-            "logit_equivalence",
-            math.isfinite(patched_vs_explicit) and patched_vs_explicit <= tolerance,
-            patched_vs_explicit_max_abs=patched_vs_explicit,
-            native_vs_explicit_max_abs=native_vs_explicit,
-            tolerance=tolerance,
-            tolerance_rule="max(native_vs_explicit, 2**-7 * max|explicit logits|)",
-            dtype=str(explicit.dtype),
-        )
-    )
+    logit_gates = _logit_gates(native, explicit, patched)
+    gates.extend(logit_gates)
+    gates.append(_leading_bos_gate(job, int(tokenizer.bos_token_id)))
 
-    graph_config = _graph_config(SMOKE_K, SMOKE_MAX_EDGES, None)
+    graph_config = _graph_config(SMOKE_K, SMOKE_MAX_EDGES, 1, None)
     _reset_memory(args.device)
     started = time.perf_counter()
-    graph = _build_job(backend, job, run, graph_config, 1)
+    graph = _build_job(backend, job, run, graph_config)
     elapsed = time.perf_counter() - started
     peak = _peak_memory(args.device)
     graph["completion_token_ids"] = list(job.completion_token_ids)
@@ -566,11 +655,15 @@ def _smoke(
         "checkpoint_fingerprint": run.model_revision,
         "xllm_source_commit": run.extra_metadata["xllm_source_commit"],
         "code_commit": run.code_commit,
-        "tokenizer_length": _tokenizer_length(tokenizer),
-        "bos_id": getattr(tokenizer, "bos_id", getattr(tokenizer, "bos_token_id", None)),
+        "tokenizer_length": _tokenizer_length(tokenizer.native),
+        "bos_id": tokenizer.bos_token_id,
         "model_identity": identity.as_dict(),
         "graph_config": graph_config,
-        "edge_batch": 1,
+        "logit_differences": {
+            key: value
+            for key, value in logit_gates[0].items()
+            if key.endswith("_max_abs")
+        },
         "seconds_per_graph": round(elapsed, 4),
         "peak_bytes": peak,
         "device_bytes": _device_memory(args.device),
@@ -592,9 +685,10 @@ def execute(args) -> int:
     if args.limit:
         tasks = [(slug, rows[: args.limit]) for slug, rows in tasks]
     _log(log_path, f"loading {args.model} with xLLM {args.xllm_source} on {args.device}")
-    tokenizer, model, config, fingerprint, source_commit = load_xllm_huginn(
+    native_tokenizer, model, config, fingerprint, source_commit = load_xllm_huginn(
         args.model, args.xllm_source, args.device
     )
+    tokenizer = PromptTokenizer(native_tokenizer)
     if source_commit != XLLM_SOURCE_COMMIT:
         raise RuntimeError(f"xLLM source {source_commit!r} != {XLLM_SOURCE_COMMIT!r}")
     model.eval()
@@ -628,7 +722,7 @@ def execute(args) -> int:
         k, max_edges, edge_batch, fidelity_note = _benchmark(
             backend, planned, run, args, output_root, log_path
         )
-    graph_config = _graph_config(k, max_edges, fidelity_note)
+    graph_config = _graph_config(k, max_edges, edge_batch, fidelity_note)
     failures = 0
     for slug, rows in tasks:
         _log(log_path, f"task {slug} rows={len(rows)} edge_batch={edge_batch}")
@@ -638,7 +732,7 @@ def execute(args) -> int:
                 slug,
                 output_root,
                 tokenizer,
-                lambda job: _build_job(backend, job, run, graph_config, edge_batch),
+                lambda job: _build_job(backend, job, run, graph_config),
                 code_commit=run.code_commit,
                 model_path=run.model_path,
                 model_revision=run.model_revision,

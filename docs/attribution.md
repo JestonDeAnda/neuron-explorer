@@ -191,7 +191,8 @@ and weights are recorded on expert nodes and in metadata, but there is no
 router node. Each `SiLU(gate) * up` expert activation is a source leaf; total
 mode uses the half rule with a forward-value correction, and direct mode stops
 gradient at the leaf. All edge rows replay the row-0 recurrent state, so edge
-copies are replicas of one prompt and do not change edge values.
+copies run the same prompt. Batched kernels can still round differently at
+different copy counts, so the copy count is part of the graph configuration.
 
 ### Expert node identity
 
@@ -215,12 +216,20 @@ Graph metadata adds `runtime="xllm"`, `xllm_source_commit`, the full
 `schedule`, `routing`
 (`{"frozen": true, "score": "sigmoid", "normalization": "selected_sum",
 "top_k": 2, "experts": 25, "expert_width": 2432}`), `model_identity`,
-`source_leaves`, and `execution.edge_batch`. Resume accepts a JSON file only
-when implementation version 3, prompt/completion token IDs, row seed,
-checkpoint fingerprint, xLLM source commit, project commit, runtime, schedule,
-routing, recurrence count, prompt protocol, and `graph_config` all match. The
-edge-copy count is recorded in `execution` but is not resume identity, because
-copies only replicate rows.
+and `source_leaves`. Resume accepts a JSON file only when implementation
+version 3, prompt/completion token IDs, row seed, checkpoint fingerprint, xLLM
+source commit, project commit, runtime, schedule, routing, recurrence count,
+prompt protocol, and the full `graph_config` all match. As for Huginn-0125,
+`graph_config.batch` is the direct-edge copy count, so changing it (for
+example by rerunning with or without `--benchmark-first`) rebuilds every
+graph.
+
+The native tokenizer is never handed to the planner directly. `PromptTokenizer`
+exposes `bos_token_id` (taken from `bos_id` when that is all the native
+tokenizer has) and an `encode(text, add_special_tokens=False)` that asks the
+native encoder for no special tokens (`add_special_tokens=False`, or
+`bos=False`/`eos=False` style flags). The `native_bos` prompt protocol then
+prepends exactly one BOS.
 
 ### Runtime build, smoke, and batch
 
@@ -256,12 +265,17 @@ uv run python scripts/run_moe_huginn_attribution.py \
 It exits nonzero unless every gate passes: runtime identity, one MoE execution
 per schedule slot, one input injection per recurrence, routes (selected count,
 valid distinct IDs, weights summing to one within 0.01), stable recurrent
-shared IDs, logit equivalence, completion coverage, version-3 resume
-validation, and edge causality. Logit equivalence compares the patched forward
-with an explicit-attention control (`patched_vs_explicit_max_abs`) and reports
-the native FlashAttention difference (`native_vs_explicit_max_abs`)
-separately; the tolerance is the larger of the native difference and
-`2**-7 × max|logit|`. The report also records peak GPU bytes and seconds.
+shared IDs, native attention control, logit equivalence, a single leading BOS
+(and no other BOS) in the planned token IDs, completion coverage, version-3
+resume validation, and edge causality. Both logit gates compare against an
+explicit-attention control and use fixed bounds scaled by the control's
+largest logit magnitude: `native_attention_control` requires
+`native_vs_explicit_max_abs <= 2**-7 × max|logit|` (BF16 rounding scale), and
+`logit_equivalence` requires the tighter
+`patched_vs_explicit_max_abs <= 2**-9 × max|logit|`. A native kernel gap never
+loosens the patched bound. `logit_differences` records all three maxima,
+including `patched_vs_native_max_abs`. The report also records peak GPU bytes
+and seconds.
 
 The full batch:
 
@@ -282,7 +296,7 @@ capped at 4, then verifies that copy count on the same condition. An OOM halves
 copies first; only an OOM at one copy halves `k` (minimum 64) and `max_edges`
 (minimum 256), and that reduction is written to `output/benchmark.json`
 (`copy_reductions`, `fidelity_reductions`) and to every graph's
-`graph_config` (`fidelity_reduced`, `fidelity_note`). One model copy stays
+`graph_config` (`batch`, `fidelity_reduced`, `fidelity_note`). One model copy stays
 resident and graphs run serially. The benchmark also records frozen routes,
 the explicit attention kernel, and the applied edge-copy count. Any failed
 condition is listed in `output/summary.json` and makes the process exit 1.

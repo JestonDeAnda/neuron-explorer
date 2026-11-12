@@ -1938,12 +1938,13 @@ def _runner_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **overrides
         json.dumps(_dataset_row()) + "\n", encoding="utf-8"
     )
     model = Huginn(num_experts=overrides.pop("num_experts", 25), inter_dim=2432).eval()
+    tokenizer = overrides.pop("tokenizer", None) or _TinyTokenizer()
     loads: list[tuple[str, str, str]] = []
 
     def fake_load(model_path, source_path, device):
         loads.append((str(model_path), str(source_path), device))
         return (
-            _TinyTokenizer(),
+            tokenizer,
             model,
             _tiny_config(model),
             "checkpoint-sha256:tiny",
@@ -2326,7 +2327,7 @@ def test_benchmark_records_frozen_routes_attention_one_model_and_edge_batch(
     assert all(call["batch"] == 4 for call in builds[2:])
     for path in _graph_files(args).values():
         metadata = load_graph(path)["metadata"]
-        assert metadata["execution"]["edge_batch"] == 4
+        assert metadata["graph_config"]["batch"] == 4
         assert metadata["graph_config"]["fidelity_reduced"] is False
 
 
@@ -2425,7 +2426,9 @@ def test_smoke_writes_gated_report_and_skips_batch(
         "recurrent_injections",
         "routes",
         "recurrent_shared_ids",
+        "native_attention_control",
         "logit_equivalence",
+        "single_leading_bos",
         "completion_coverage",
         "graph_version_3",
         "edge_causality",
@@ -2434,9 +2437,186 @@ def test_smoke_writes_gated_report_and_skips_batch(
     assert gates["recurrent_injections"]["observed"] == 2
     assert report["graph_config"]["k"] == 8
     assert report["graph_config"]["max_edges"] == 40
-    assert report["edge_batch"] == 1
+    assert report["graph_config"]["batch"] == 1
+    differences = report["logit_differences"]
+    assert set(differences) == {
+        "patched_vs_explicit_max_abs",
+        "native_vs_explicit_max_abs",
+        "patched_vs_native_max_abs",
+    }
     assert report["checkpoint_fingerprint"] == "checkpoint-sha256:tiny"
     assert report["xllm_source_commit"] == XLLM_SOURCE_COMMIT
     assert "seconds_per_graph" in report and "peak_bytes" in report
     assert json_is_complete(Path(report["graph_json"]))
     assert not (Path(args.output_root) / "output" / "manifest.jsonl").exists()
+
+
+def test_resume_rebuilds_when_edge_copy_count_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from neuron_explorer.attribution.schema import load_graph
+
+    runner, args, _model, _loads = _runner_fixture(
+        tmp_path, monkeypatch, benchmark_first=True
+    )
+    monkeypatch.setattr(runner, "_peak_memory", lambda device: 10)
+    monkeypatch.setattr(runner, "_device_memory", lambda device: 100)
+    assert runner.execute(args) == 0
+    args.benchmark_first = False
+    builds = _count_builds(runner, monkeypatch)
+
+    assert runner.execute(args) == 0
+
+    assert [call["batch"] for call in builds] == [1, 1, 1, 1]
+    for path in _graph_files(args).values():
+        assert load_graph(path)["metadata"]["graph_config"]["batch"] == 1
+
+
+def test_logit_gates_fail_large_native_gap_even_when_patched_matches() -> None:
+    from neuron_explorer.attribution.moe.xllm_huginn import runner
+
+    explicit = torch.linspace(-20.0, 20.0, 64).reshape(4, 16)
+    gates = {
+        gate["name"]: gate
+        for gate in runner._logit_gates(explicit + 3.0, explicit, explicit.clone())
+    }
+
+    assert gates["logit_equivalence"]["ok"] is True
+    assert gates["native_attention_control"]["ok"] is False
+    for gate in gates.values():
+        assert gate["patched_vs_explicit_max_abs"] == 0.0
+        assert gate["native_vs_explicit_max_abs"] == pytest.approx(3.0)
+        assert gate["patched_vs_native_max_abs"] == pytest.approx(3.0)
+    assert gates["logit_equivalence"]["tolerance"] < gates["native_attention_control"][
+        "tolerance"
+    ]
+    assert gates["native_attention_control"]["tolerance"] == pytest.approx(20.0 * 2**-7)
+
+
+def test_logit_gates_fail_patched_drift_within_native_bound() -> None:
+    from neuron_explorer.attribution.moe.xllm_huginn import runner
+
+    explicit = torch.linspace(-20.0, 20.0, 64).reshape(4, 16)
+    native = explicit + 0.1
+    patched = explicit + 0.1
+
+    gates = {g["name"]: g for g in runner._logit_gates(native, explicit, patched)}
+
+    assert gates["native_attention_control"]["ok"] is True
+    assert gates["logit_equivalence"]["ok"] is False
+
+
+def test_smoke_fails_when_native_attention_diverges_from_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, args, _model, _loads = _runner_fixture(tmp_path, monkeypatch, smoke=True)
+    original = runner._native_logits
+    monkeypatch.setattr(
+        runner, "_native_logits", lambda model, ids: original(model, ids) + 5.0
+    )
+
+    assert runner.execute(args) == 1
+
+    report = json.loads((Path(args.output_root) / "smoke.json").read_text("utf-8"))
+    gates = {gate["name"]: gate for gate in report["gates"]}
+    assert report["ok"] is False
+    assert gates["native_attention_control"]["ok"] is False
+    assert gates["logit_equivalence"]["ok"] is True
+
+
+class _BosIdTokenizer:
+    """SentencePiece-style: only ``bos_id``; ``encode`` adds BOS unless told not to."""
+
+    bos_id = 0
+
+    def __init__(self, force_bos: bool = False) -> None:
+        self.force_bos = force_bos
+        self.calls: list[tuple[bool, bool]] = []
+
+    def encode(self, text: str, bos: bool = True, eos: bool = True) -> list[int]:
+        self.calls.append((bos, eos))
+        tokens = [1 + ord(char) % 16 for char in text]
+        if bos or self.force_bos:
+            tokens = [self.bos_id, *tokens]
+        if eos:
+            tokens = [*tokens, 16]
+        return tokens
+
+
+class _SpecialTokensDefaultTokenizer:
+    """Hugging Face-style: ``add_special_tokens`` defaults to adding BOS."""
+
+    bos_token_id = 0
+
+    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
+        tokens = [1 + ord(char) % 16 for char in text]
+        return [0, *tokens] if add_special_tokens else tokens
+
+
+def _raw(text: str) -> list[int]:
+    return [1 + ord(char) % 16 for char in text]
+
+
+@pytest.mark.parametrize("native", [_BosIdTokenizer, _SpecialTokensDefaultTokenizer])
+def test_prompt_tokenizer_yields_one_leading_bos_and_original_tokens(native) -> None:
+    from neuron_explorer.attribution.huginn.batch import plan_row
+    from neuron_explorer.attribution.moe.xllm_huginn.runner import PromptTokenizer
+
+    tokenizer = PromptTokenizer(native())
+
+    assert tokenizer.bos_token_id == 0
+    assert tokenizer.encode("ab", add_special_tokens=False) == _raw("ab")
+    row = _dataset_row()
+    for job in plan_row(row, "00_tiny", tokenizer):
+        prompt_key = "clean" if job.condition.startswith("clean") else "corrupted"
+        completion_key = {
+            "clean_correct": "correct",
+            "clean_incorrect": "incorrect",
+            "corrupted_correct": "corrupted_correct",
+            "corrupted_incorrect": "corrupted_incorrect",
+        }[job.condition]
+        assert job.token_ids == [0, *_raw(row[prompt_key]), *_raw(row[completion_key])]
+        assert job.prompt_protocol["bos_token_id"] == 0
+
+
+def test_prompt_tokenizer_rejects_requests_for_special_tokens() -> None:
+    from neuron_explorer.attribution.moe.xllm_huginn.runner import PromptTokenizer
+
+    native = _BosIdTokenizer()
+
+    with pytest.raises(ValueError, match="special tokens"):
+        PromptTokenizer(native).encode("ab", add_special_tokens=True)
+    assert native.calls == []
+
+
+def test_runner_plans_bos_id_tokenizer_with_one_leading_bos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from neuron_explorer.attribution.schema import load_graph
+
+    native = _BosIdTokenizer()
+    runner, args, _model, _loads = _runner_fixture(
+        tmp_path, monkeypatch, tokenizer=native
+    )
+
+    assert runner.execute(args) == 0
+
+    assert native.calls and set(native.calls) == {(False, False)}
+    for path in _graph_files(args).values():
+        prompt = load_graph(path)["prompt_token_ids"]
+        assert prompt[0] == 0 and 0 not in prompt[1:]
+
+
+def test_smoke_fails_when_native_encoder_adds_a_second_bos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner, args, _model, _loads = _runner_fixture(
+        tmp_path, monkeypatch, smoke=True, tokenizer=_BosIdTokenizer(force_bos=True)
+    )
+
+    assert runner.execute(args) == 1
+
+    report = json.loads((Path(args.output_root) / "smoke.json").read_text("utf-8"))
+    gates = {gate["name"]: gate for gate in report["gates"]}
+    assert gates["single_leading_bos"]["ok"] is False
+    assert gates["single_leading_bos"]["leading_bos"] == 2
