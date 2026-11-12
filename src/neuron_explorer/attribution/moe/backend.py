@@ -44,6 +44,7 @@ class MoELinearizationBackend(Protocol):
         completion_start: int,
         token_ids: Sequence[int],
     ) -> MoEContributions:
+        """Attribute targets whose nonnegative indices address ``routed_neurons``."""
         raise NotImplementedError
 
     def activations(self, neurons: Sequence[RoutedNeuron]) -> torch.Tensor:

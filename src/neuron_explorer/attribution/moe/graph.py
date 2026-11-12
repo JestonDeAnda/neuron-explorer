@@ -52,6 +52,8 @@ def build_moe_graph(
         raise ValueError("completion must be non-empty and follow a non-empty prompt")
     if k < 1 or batch < 1:
         raise ValueError("k and batch must be positive")
+    if max_edges is not None and max_edges < 1:
+        raise ValueError("max_edges must be positive or None")
 
     backend.forward(ids, mode="total")
     routed_axis = tuple(backend.routed_neurons())
@@ -68,16 +70,12 @@ def build_moe_graph(
     backend.forward(ids, copies=batch, replay=True, mode="direct")
     activations = backend.activations(selected).detach().float()
     length = len(ids)
-    target_node = effective_k + length
-    n_nodes = target_node + 1
-    adjacency = torch.zeros(n_nodes, n_nodes)
-    other = torch.zeros(n_nodes)
-    target_rows = list(range(effective_k)) + [target_node]
+    logical_target_rows = list(range(effective_k)) + [-1]
     global_targets = [int(index) for index in chosen] + [-1]
-    completion_value: float | None = None
-
-    for start in range(0, len(target_rows), batch):
-        rows = target_rows[start : start + batch]
+    chunks = []
+    source_axis = None
+    for start in range(0, len(logical_target_rows), batch):
+        rows = logical_target_rows[start : start + batch]
         requested = global_targets[start : start + batch]
         contribution = backend.direct_targets(requested, completion_start, ids)
         if tuple(contribution.routed_neurons) != tuple(backend.routed_neurons()):
@@ -86,17 +84,43 @@ def build_moe_graph(
             raise ValueError("routed contributions have an invalid shape")
         if contribution.token_embeddings.shape != (len(rows), length):
             raise ValueError("token-embedding contributions have an invalid shape")
+        if contribution.source_contributions.shape != (
+            len(rows),
+            len(contribution.source_leaves),
+        ):
+            raise ValueError("named source contributions have an invalid shape")
+        if source_axis is None:
+            source_axis = contribution.source_leaves
+        elif source_axis != contribution.source_leaves:
+            raise ValueError("direct contributions changed the named source axis")
+        chunks.append((rows, requested, contribution))
+
+    source_axis = tuple(source_axis or ())
+    source_start = effective_k + length
+    target_node = source_start + len(source_axis)
+    n_nodes = target_node + 1
+    adjacency = torch.zeros(n_nodes, n_nodes)
+    other = torch.zeros(n_nodes)
+    completion_value: float | None = None
+
+    for logical_rows, requested, contribution in chunks:
+        rows = [target_node if row == -1 else row for row in logical_rows]
         row_tensor = torch.tensor(rows, dtype=torch.long)
         adjacency[row_tensor, :effective_k] = contribution.routed[:, chosen].float()
         adjacency[row_tensor, effective_k : effective_k + length] = (
             contribution.token_embeddings.float()
         )
-        state = contribution.state.float().reshape(len(rows), -1).sum(-1)
+        adjacency[row_tensor, source_start:target_node] = (
+            contribution.source_contributions.float()
+        )
         values = contribution.targets.detach().float().reshape(len(rows))
-        other[row_tensor] = values - adjacency[row_tensor].sum(1) - state
+        other[row_tensor] = values - adjacency[row_tensor].sum(1)
         if requested[-1] == -1:
             completion_value = float(values[-1])
 
+    diagonal = adjacency.diagonal().clone()
+    other = other + diagonal
+    adjacency.fill_diagonal_(0)
     absolute = adjacency.abs()
     normal = absolute / (
         absolute.sum(1, keepdim=True) + other.abs()[:, None]
@@ -136,17 +160,23 @@ def build_moe_graph(
                     "n": routed.serialized_neuron,
                     "physical_neuron": routed.serialized_neuron,
                     "expert_id": routed.expert_id,
+                    "runtime_expert_id": routed.runtime_expert_id,
                     "expert_neuron": routed.expert_neuron,
+                    "expert_kind": routed.expert_kind,
                     "router_rank": routed.router_rank,
                     "routing_weight": routed.routing_weight,
                     "shared_weight_id": routed.shared_weight_id,
                     "act": round(float(activations[index]), 4),
-                    "gate": round(float(routed.routing_weight), 4),
+                    "gate": (
+                        round(float(routed.routing_weight), 4)
+                        if routed.routing_weight is not None
+                        else None
+                    ),
                     "influence": round(float(influence[index]), 5),
                     "other": round(float(other[index]), 4),
                 }
             )
-        elif index < target_node:
+        elif index < source_start:
             nodes.append(
                 {
                     "kind": "embed",
@@ -155,6 +185,21 @@ def build_moe_graph(
                     "n": 0,
                     "act": None,
                     "influence": round(float(influence[index]), 5),
+                }
+            )
+        elif index < target_node:
+            source = source_axis[index - source_start]
+            nodes.append(
+                {
+                    "kind": "embed",
+                    "layer": -1,
+                    "pos": -1,
+                    "n": index - source_start,
+                    "act": None,
+                    "influence": round(float(influence[index]), 5),
+                    "source_kind": source.kind,
+                    "source_name": source.name,
+                    "source_metadata": dict(source.metadata),
                 }
             )
         else:
@@ -186,12 +231,16 @@ def build_moe_graph(
             "edge_threshold": edge_threshold,
             "max_edges": max_edges,
             "target": "teacher_forced_completion_logprob",
-            "edge_semantics": "local_linear_half_rule_direct",
+            "edge_semantics": backend.identity.direct_edge_semantics,
         }
     )
     info["graph_config"] = graph_config
     info["model_identity"] = backend.identity.as_dict()
     info["schedule"] = [slot.as_dict() for slot in backend.schedule]
+    info["source_leaves"] = [
+        {"name": source.name, "kind": source.kind, "metadata": dict(source.metadata)}
+        for source in source_axis
+    ]
     value = float(completion_value or 0.0)
     probability = math.exp(value)
     return {
@@ -234,6 +283,10 @@ def _edge_mask(
     cut_index = min(int((cumulative < edge_threshold).sum()), len(ranked) - 1)
     mask = (edge_score >= ranked[cut_index]) & (edge_score > 0)
     if max_edges and int(mask.sum()) > max_edges:
-        cutoff = flat.topk(max_edges).values[-1]
-        mask = mask & (edge_score >= cutoff)
+        eligible = mask.flatten().nonzero().flatten()
+        scores = flat[eligible]
+        chosen = eligible[scores.topk(max_edges).indices]
+        capped = torch.zeros_like(flat, dtype=torch.bool)
+        capped[chosen] = True
+        mask = capped.reshape_as(edge_score)
     return mask

@@ -10,6 +10,7 @@ from neuron_explorer.attribution.moe.types import (
     MoEContributions,
     MoEExecutionSlot,
     MoEModelIdentity,
+    MoESourceLeaf,
     RoutedNeuron,
     RoutingSnapshot,
 )
@@ -53,7 +54,11 @@ class TinyEagerMoEBackend:
             top_k=top_k,
             router_activation=router_activation,
             router_normalization=router_normalization,
-            auxiliary={"implementation": "eager-pytorch"},
+            device_placement="cpu",
+            expert_parallel=False,
+            expert_parallel_capable=False,
+            direct_edge_semantics="local_linear_half_rule_direct",
+            auxiliary=(("implementation", "eager-pytorch"),),
         )
         self.schedule = (
             MoEExecutionSlot(
@@ -65,23 +70,24 @@ class TinyEagerMoEBackend:
             ),
         )
         self._router_strategy = router_strategy
-        self._embedding = torch.linspace(-0.8, 0.9, 17 * 4).reshape(17, 4)
-        self._router = torch.linspace(-0.2, 0.25, 4 * num_experts).reshape(
-            4, num_experts
-        )
-        self._router_bias = torch.arange(num_experts, 0, -1, dtype=torch.float) * 2.0
-        base = torch.linspace(-0.7, 0.8, num_experts * 4 * 3)
+        generator = torch.Generator().manual_seed(1729 + num_experts)
+        self._embedding = torch.randn(17, 4, generator=generator)
+        self._router = torch.randn(4, num_experts, generator=generator)
+        self._router_bias = torch.linspace(-0.15, 0.15, num_experts)
+        base = torch.randn(num_experts * 4 * 3, generator=generator)
         self._gate = base.reshape(num_experts, 4, 3)
         self._up = base.flip(0).reshape(num_experts, 4, 3)
-        self._down = torch.linspace(-0.5, 0.6, num_experts * 3 * 4).reshape(
-            num_experts, 3, 4
-        )
-        self._output = torch.linspace(-0.4, 0.45, 4 * 17).reshape(4, 17)
+        self._down = torch.randn(num_experts, 3, 4, generator=generator)
+        self._output = torch.randn(4, 17, generator=generator)
+        self._initial_state = torch.tensor([0.15, -0.1, 0.05, 0.2])
         self._neurons: tuple[RoutedNeuron, ...] = ()
         self._routing_snapshot: RoutingSnapshot | None = None
         self._leaf: torch.Tensor | None = None
+        self._direct_target_values: torch.Tensor | None = None
         self._embedding_leaf: torch.Tensor | None = None
+        self._state_leaf: torch.Tensor | None = None
         self._logits: torch.Tensor | None = None
+        self._full_router_probabilities: torch.Tensor | None = None
         self._index: dict[RoutedNeuron, int] = {}
         self._token_ids: tuple[int, ...] | None = None
 
@@ -90,6 +96,12 @@ class TinyEagerMoEBackend:
         if self._routing_snapshot is None:
             raise RuntimeError("forward must be called before reading routes")
         return self._routing_snapshot
+
+    @property
+    def full_router_probabilities(self) -> torch.Tensor:
+        if self._full_router_probabilities is None:
+            raise RuntimeError("forward must be called before reading router probabilities")
+        return self._full_router_probabilities
 
     def forward(
         self,
@@ -102,17 +114,30 @@ class TinyEagerMoEBackend:
         del replay, mode
         ids = torch.tensor([int(token) for token in token_ids], dtype=torch.long)
         embedding = self._embedding[ids].detach().requires_grad_(True)
-        router_logits = embedding.detach() @ self._router + self._router_bias
+        state = self._initial_state.detach().requires_grad_(True)
+        source_hidden = embedding + state
+        router_logits = source_hidden.detach() @ self._router + self._router_bias
         selected, weights = self._router_strategy(router_logits, self.identity.top_k)
+        full_probabilities = (
+            router_logits.softmax(-1)
+            if self.identity.router_activation == "softmax"
+            else router_logits.sigmoid()
+        )
 
         neurons: list[RoutedNeuron] = []
         values: list[torch.Tensor] = []
+        direct_values: list[torch.Tensor] = []
         for position in range(len(ids)):
-            hidden = embedding[position].detach()
+            hidden = source_hidden[position]
             for rank in range(self.identity.top_k):
                 expert = int(selected[position, rank])
-                activation = torch.nn.functional.silu(hidden @ self._gate[expert]) * (
-                    hidden @ self._up[expert]
+                gate_linear = hidden @ self._gate[expert]
+                up_linear = hidden @ self._up[expert]
+                gate = gate_linear.detach()
+                up = up_linear.detach()
+                activation = torch.nn.functional.silu(gate) * up
+                half_rule = 0.5 * torch.sigmoid(gate) * (
+                    gate_linear * up + gate * up_linear
                 )
                 for expert_neuron in range(self.identity.expert_width):
                     neurons.append(
@@ -127,6 +152,7 @@ class TinyEagerMoEBackend:
                         )
                     )
                     values.append(activation[expert_neuron])
+                    direct_values.append(half_rule[expert_neuron])
 
         leaf = torch.stack(values).detach().requires_grad_(True)
         hidden_rows: list[torch.Tensor] = []
@@ -140,20 +166,26 @@ class TinyEagerMoEBackend:
                     expert_values @ self._down[expert]
                 )
                 offset += self.identity.expert_width
-            hidden_rows.append(embedding[position] + update)
+            hidden_rows.append(source_hidden[position] + update)
         logits = torch.stack(hidden_rows) @ self._output
 
         self._neurons = tuple(neurons)
         self._index = {neuron: index for index, neuron in enumerate(self._neurons)}
         self._routing_snapshot = RoutingSnapshot(
-            selected_experts=selected.detach(),
-            routing_weights=weights.detach(),
+            selected_experts=selected.detach().unsqueeze(0),
+            routing_weights=weights.detach().unsqueeze(0),
+            selected_expert_counts=torch.full(
+                (1, len(ids)), self.identity.top_k, dtype=torch.long
+            ),
             router_activation=self.identity.router_activation,
             router_normalization=self.identity.router_normalization,
         )
         self._leaf = leaf
+        self._direct_target_values = torch.stack(direct_values)
         self._embedding_leaf = embedding
+        self._state_leaf = state
         self._logits = logits
+        self._full_router_probabilities = full_probabilities.detach().unsqueeze(0)
         self._token_ids = tuple(int(token) for token in token_ids)
         return logits.unsqueeze(0).expand(copies, -1, -1)
 
@@ -178,20 +210,23 @@ class TinyEagerMoEBackend:
         self._ensure_forward(token_ids)
         assert self._leaf is not None
         assert self._embedding_leaf is not None
+        assert self._state_leaf is not None
+        assert self._direct_target_values is not None
         scalar_targets = [
             (
                 self.completion_logprob(0, completion_start, token_ids)
                 if target == -1
-                else self._leaf[int(target)]
+                else self._direct_target_values[int(target)]
             )
             for target in targets
         ]
         routed_rows: list[torch.Tensor] = []
         embedding_rows: list[torch.Tensor] = []
+        source_rows: list[torch.Tensor] = []
         for scalar in scalar_targets:
-            routed_gradient, embedding_gradient = torch.autograd.grad(
+            routed_gradient, embedding_gradient, state_gradient = torch.autograd.grad(
                 scalar,
-                (self._leaf, self._embedding_leaf),
+                (self._leaf, self._embedding_leaf, self._state_leaf),
                 retain_graph=True,
                 allow_unused=True,
             )
@@ -199,16 +234,22 @@ class TinyEagerMoEBackend:
                 routed_gradient = torch.zeros_like(self._leaf)
             if embedding_gradient is None:
                 embedding_gradient = torch.zeros_like(self._embedding_leaf)
+            if state_gradient is None:
+                state_gradient = torch.zeros_like(self._state_leaf)
             routed_rows.append((routed_gradient * self._leaf).detach())
             embedding_rows.append(
                 (embedding_gradient * self._embedding_leaf).sum(-1).detach()
             )
+            source_rows.append(
+                (state_gradient * self._state_leaf).sum().detach().reshape(1)
+            )
         return MoEContributions(
             routed=torch.stack(routed_rows),
             token_embeddings=torch.stack(embedding_rows),
-            state=torch.zeros(len(targets)),
+            source_contributions=torch.stack(source_rows),
             targets=torch.stack([target.detach() for target in scalar_targets]),
             routed_neurons=self._neurons,
+            source_leaves=(MoESourceLeaf("initial_state"),),
         )
 
     def activations(self, neurons: Sequence[RoutedNeuron]) -> torch.Tensor:

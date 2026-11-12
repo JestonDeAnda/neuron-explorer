@@ -6,6 +6,7 @@ from neuron_explorer.attribution.moe.types import (
     MoEContributions,
     MoEExecutionSlot,
     MoEModelIdentity,
+    MoESourceLeaf,
     RoutedNeuron,
     RoutingSnapshot,
 )
@@ -15,6 +16,7 @@ __all__ = [
     "MoEExecutionSlot",
     "MoELinearizationBackend",
     "MoEModelIdentity",
+    "MoESourceLeaf",
     "RoutedNeuron",
     "RoutingSnapshot",
     "build_moe_graph",
