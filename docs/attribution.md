@@ -110,6 +110,19 @@ checkpoint once at process startup.
 `scripts/huginn_mount_check.py` checks the dataset, checkpoint, staged commit,
 and, with `--mounts`, the four DLC storage mounts before any GPU work.
 
+For the xLLM MoE checkpoint, verify the pinned source checkout, extension,
+grouped GEMM, artifact manifest, dataset, staged commit, and output mount first:
+
+```bash
+uv run python scripts/moe_huginn_mount_check.py \
+  --dataset /path/to/按任务 \
+  --model /path/to/LoopedLM-P1-moe-huginn-500b \
+  --xllm-source /path/to/xllm-loop \
+  --stage /path/to/staged/neuron-explorer \
+  --commit "$(git rev-parse HEAD)" \
+  --output-root /path/to/attribution/moe-huginn-500b
+```
+
 Huginn completion graphs have one aggregate output pseudo-node rather than one
 next-token logit. Top-level `target.kind` is `completion_logprob`; it includes
 all completion token IDs and prediction positions. `completion_logprob` is the
