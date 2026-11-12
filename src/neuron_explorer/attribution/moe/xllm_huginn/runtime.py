@@ -10,6 +10,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import torch
+from safetensors import SafetensorError, safe_open
+
 XLLM_SOURCE_COMMIT = "755c7b3a91081fe0f83500eabd53bd2490b8b745"
 
 _MODEL_CONTRACT = {
@@ -156,7 +159,12 @@ def _verify_runtime_identity(model: object, tokenizer: object, config: object) -
         backend = getattr(tokenizer, "_tokenizer", None)
         if backend is None:
             raise RuntimeError("xLLM tokenizer does not expose its actual length")
-        tokenizer_length = len(backend)
+        try:
+            tokenizer_length = len(backend)
+        except TypeError as exc:
+            raise RuntimeError(
+                "xLLM tokenizer does not expose its actual length"
+            ) from exc
     if tokenizer_length != 250624:
         raise RuntimeError(
             f"xLLM tokenizer length {tokenizer_length!r}, expected 250624"
@@ -170,17 +178,82 @@ def _verify_strict_state_dict(model: object, model_root: Path) -> None:
     index_path = model_root / "model.safetensors.index.json"
     try:
         index = json.loads(index_path.read_text(encoding="utf-8"))
-        expected = set(index["weight_map"])
-        actual = set(model.state_dict())  # type: ignore[attr-defined]
+        weight_map = index["weight_map"]
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise TypeError("weight_map must be a non-empty object")
+        state_dict = model.state_dict()  # type: ignore[attr-defined]
+        expected = set(weight_map)
+        actual = set(state_dict)
     except (AttributeError, KeyError, OSError, TypeError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"cannot verify strict state-dict load: {exc}") from exc
-    if not expected or actual != expected:
+    if actual != expected:
         missing = sorted(expected - actual)
         unexpected = sorted(actual - expected)
         raise RuntimeError(
             "strict state-dict verification failed: "
             f"missing={missing} unexpected={unexpected}"
         )
+    by_shard: dict[str, set[str]] = {}
+    for name, shard in weight_map.items():
+        if not isinstance(name, str) or not isinstance(shard, str):
+            raise RuntimeError("strict state-dict verification found an invalid weight_map")
+        by_shard.setdefault(shard, set()).add(name)
+
+    try:
+        for shard_name, expected_shard_keys in sorted(by_shard.items()):
+            with safe_open(
+                model_root / shard_name,
+                framework="pt",
+                device="cpu",
+            ) as checkpoint:
+                actual_shard_keys = set(checkpoint.keys())
+                if actual_shard_keys != expected_shard_keys:
+                    missing = sorted(expected_shard_keys - actual_shard_keys)
+                    unexpected = sorted(actual_shard_keys - expected_shard_keys)
+                    raise RuntimeError(
+                        "strict checkpoint shard verification failed: "
+                        f"missing={missing} unexpected={unexpected}"
+                    )
+                for name in sorted(expected_shard_keys):
+                    model_tensor = state_dict[name]
+                    if not isinstance(model_tensor, torch.Tensor):
+                        raise RuntimeError(
+                            f"strict state-dict tensor {name!r} is not a tensor"
+                        )
+                    checkpoint_slice = checkpoint.get_slice(name)
+                    checkpoint_shape = tuple(checkpoint_slice.get_shape())
+                    checkpoint_dtype = checkpoint_slice.get_dtype()
+                    if tuple(model_tensor.shape) != checkpoint_shape:
+                        raise RuntimeError(
+                            f"strict state-dict shape mismatch for {name!r}: "
+                            f"{tuple(model_tensor.shape)} != {checkpoint_shape}"
+                        )
+                    sample_index = _tensor_sample_index(checkpoint_shape)
+                    checkpoint_sample = checkpoint_slice[sample_index]
+                    if model_tensor.dtype != checkpoint_sample.dtype:
+                        raise RuntimeError(
+                            f"strict state-dict dtype mismatch for {name!r}: "
+                            f"{model_tensor.dtype} != {checkpoint_dtype}"
+                        )
+                    model_sample = model_tensor[sample_index].detach().cpu()
+                    if not torch.equal(model_sample, checkpoint_sample):
+                        raise RuntimeError(
+                            f"strict state-dict value mismatch for {name!r}"
+                        )
+    except RuntimeError:
+        raise
+    except (IndexError, OSError, SafetensorError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"cannot verify strict checkpoint tensors: {exc}") from exc
+
+
+def _tensor_sample_index(shape: tuple[int, ...]) -> tuple[slice, ...]:
+    """Select at most eight deterministic contiguous values without full loading."""
+    if not shape:
+        return ()
+    return (
+        *(slice(0, min(1, size)) for size in shape[:-1]),
+        slice(0, min(8, shape[-1])),
+    )
 
 
 def _module_inside_source(module: object, source_root: Path) -> bool:

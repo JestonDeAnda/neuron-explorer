@@ -12,6 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
+from safetensors.torch import save_file
 
 from neuron_explorer.attribution.moe.xllm_huginn.mount import check_moe_mounts
 from neuron_explorer.attribution.moe.xllm_huginn.runtime import (
@@ -99,7 +101,10 @@ def _checkpoint(root: Path) -> None:
         encoding="utf-8",
     )
     (root / "native_model.py").write_text("MODEL = 'huginn'\n", encoding="utf-8")
-    (root / "model-00001-of-00001.safetensors").write_bytes(b"weights")
+    save_file(
+        {"layer.weight": _checkpoint_tensor()},
+        root / "model-00001-of-00001.safetensors",
+    )
     (root / "tokenizer").mkdir()
     (root / "tokenizer" / "tokenizer.json").write_text("{}", encoding="utf-8")
     names = [
@@ -268,6 +273,18 @@ class _FakeTokenizer:
         return self.length
 
 
+class _TokenizerWithoutLength:
+    bos_id = 0
+
+    def __init__(self, backend=None) -> None:
+        if backend is not None:
+            self._tokenizer = backend
+
+
+def _checkpoint_tensor() -> torch.Tensor:
+    return torch.arange(6, dtype=torch.float32).reshape(2, 3)
+
+
 def _runtime_config(**overrides: object) -> SimpleNamespace:
     values = {
         "num_layers": 28,
@@ -287,7 +304,12 @@ def _runtime_config(**overrides: object) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
-def _runtime_model(class_name: str = "Huginn", **overrides: object):
+def _runtime_model(
+    class_name: str = "Huginn",
+    *,
+    state_tensor: torch.Tensor | None = None,
+    **overrides: object,
+):
     model = type(class_name, (), {})()
     values = {
         "num_layers": 28,
@@ -299,7 +321,8 @@ def _runtime_model(class_name: str = "Huginn", **overrides: object):
     values.update(overrides)
     for name, value in values.items():
         setattr(model, name, value)
-    model.state_dict = lambda: {"layer.weight": object()}
+    tensor = _checkpoint_tensor() if state_tensor is None else state_tensor
+    model.state_dict = lambda: {"layer.weight": tensor}
     return model
 
 
@@ -507,6 +530,87 @@ def test_native_loader_rejects_non_strict_state_dict_result(
     )
 
     with pytest.raises(RuntimeError, match="strict state-dict"):
+        load_xllm_huginn(model_path, source, "cpu")
+
+
+@pytest.mark.parametrize(
+    ("state_tensor", "message"),
+    [
+        (torch.zeros(3, 2, dtype=torch.float32), "shape"),
+        (torch.zeros(2, 3, dtype=torch.float64), "dtype"),
+        (_checkpoint_tensor() + 1, "value"),
+    ],
+)
+def test_native_loader_rejects_tensor_content_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state_tensor: torch.Tensor,
+    message: str,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    _checkpoint(model_path)
+    model = _runtime_model(state_tensor=state_tensor)
+    _install_fake_xllm(monkeypatch, source, model=model)
+    monkeypatch.setattr(
+        "neuron_explorer.attribution.moe.xllm_huginn.runtime.verify_xllm_source",
+        lambda path, expected: XLLM_SOURCE_COMMIT,
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        load_xllm_huginn(model_path, source, "cpu")
+
+
+def test_native_loader_uses_backing_tokenizer_length(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    _checkpoint(model_path)
+    tokenizer = _TokenizerWithoutLength(_FakeTokenizer())
+    _install_fake_xllm(monkeypatch, source, tokenizer=tokenizer)
+    monkeypatch.setattr(
+        "neuron_explorer.attribution.moe.xllm_huginn.runtime.verify_xllm_source",
+        lambda path, expected: XLLM_SOURCE_COMMIT,
+    )
+
+    loaded = load_xllm_huginn(model_path, source, "cpu")
+
+    assert loaded[0] is tokenizer
+
+
+@pytest.mark.parametrize(
+    "tokenizer",
+    [
+        _TokenizerWithoutLength(),
+        _TokenizerWithoutLength(object()),
+    ],
+)
+def test_native_loader_rejects_tokenizer_without_any_length(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tokenizer: _TokenizerWithoutLength,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    _checkpoint(model_path)
+    _install_fake_xllm(
+        monkeypatch,
+        source,
+        tokenizer=tokenizer,
+    )
+    monkeypatch.setattr(
+        "neuron_explorer.attribution.moe.xllm_huginn.runtime.verify_xllm_source",
+        lambda path, expected: XLLM_SOURCE_COMMIT,
+    )
+
+    with pytest.raises(RuntimeError, match="actual length"):
         load_xllm_huginn(model_path, source, "cpu")
 
 
